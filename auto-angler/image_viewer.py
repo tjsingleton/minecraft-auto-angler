@@ -1,3 +1,4 @@
+import PySimpleGUI as sg
 import cv2
 from cursor_image import CursorImage
 

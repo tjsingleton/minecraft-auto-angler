@@ -57,7 +57,7 @@ class AutoFishGUI:
                                      self._image_viewer.layout_row(),
                                      [self._button, self._status_text]
                                  ],
-                                 relative_location=(600, 0),
+                                 relative_location=(300, 0),
                                  keep_on_top=True, finalize=True)
 
     def run(self):
