@@ -8,12 +8,43 @@ Why?
 2. You get treasure enchants. Hello "Mending I" books!
 3. It impresses my kids. 
 
+## Setup and run
+
+Install [uv](https://docs.astral.sh/uv/) (e.g. `curl -LsSf https://astral.sh/uv/install.sh | sh`), then from the repo root:
+
+```bash
+uv sync
+uv run python -m autoangler
+```
+
+Optional (recommended for contributors):
+
+```bash
+uv sync --group dev
+```
+
+Legacy launcher (kept for backward compatibility):
+
+```bash
+cd auto-angler && uv run python auto-angler.py
+```
+
+Note: this project now uses `tkinter`. If you see `ModuleNotFoundError: No module named '_tkinter'`, install a Python
+distribution with Tk support (common fix on macOS when using `asdf`: `brew install tcl-tk@8` then reinstall Python).
+
+macOS permissions: this project uses screen capture and input control. You may need to enable permissions for the app
+you launch it from (Terminal, iTerm, VS Code, etc.) in System Settings → Privacy & Security:
+
+- Accessibility (needed for global hotkeys and input control)
+- Input Monitoring (needed for global hotkeys via `pynput`)
+- Screen Recording (needed for screenshots via `PIL.ImageGrab`)
+
 ## How to Use
 
 When you start AutoAngler, simply click "Start Fishing" or press F12. You have 5 seconds to focus on minecraft and 
 position the crosshair over your target. The software will attempt to find the cursor. It helps to have a 3x3 black wool 
 target during the day as the opencv location method has trouble with the difference in light level. This is the template 
-that opencv uses: ![](auto-angler/minecraft_cursor.png). I plan to fix this in a future version.
+that opencv uses: ![](autoangler/assets/minecraft_cursor.png). I plan to fix this in a future version.
 
 ![](docs/cursor_location.png)
 

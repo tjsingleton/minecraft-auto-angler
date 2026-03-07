@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import cv2
-import numpy as np
 
 
 class CursorImage:
@@ -12,7 +13,7 @@ class CursorImage:
         black_pixel_count: Number of black pixels
     """
 
-    def __init__(self, original: cv2.Mat, computer: cv2.Mat, black_pixel_count: int):
+    def __init__(self, original: cv2.Mat, computer: cv2.Mat, black_pixel_count: int) -> None:
         self.original = original
         self.computer = computer
         self.black_pixel_count = black_pixel_count
