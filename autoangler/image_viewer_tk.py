@@ -9,6 +9,17 @@ from PIL import Image, ImageTk
 
 from autoangler.cursor_image import CursorImage
 
+PREVIEW_MAX_WIDTH = 360
+PREVIEW_MAX_HEIGHT = 240
+
+
+def fit_within(width: int, height: int, max_width: int, max_height: int) -> tuple[int, int]:
+    if width <= 0 or height <= 0:
+        return max_width, max_height
+
+    scale = min(max_width / width, max_height / height, 1.0)
+    return max(1, int(width * scale)), max(1, int(height * scale))
+
 
 @dataclass(frozen=True)
 class ImageViewerTkElements:
@@ -56,4 +67,7 @@ class ImageViewerTk:
     @staticmethod
     def _as_photo(array: np.ndarray) -> ImageTk.PhotoImage:
         pil = Image.fromarray(array.astype("uint8"), mode="L")
+        new_size = fit_within(pil.width, pil.height, PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT)
+        if new_size != pil.size:
+            pil = pil.resize(new_size, Image.Resampling.NEAREST)
         return ImageTk.PhotoImage(pil)

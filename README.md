@@ -23,6 +23,16 @@ Optional (recommended for contributors):
 uv sync --group dev
 ```
 
+Experimental macOS audio probe:
+
+```bash
+uv run python -m autoangler.audio_probe --title-hint Minecraft
+```
+
+This probe uses ScreenCaptureKit to target Minecraft app audio and prints `BITE_CANDIDATE` lines when
+it sees a strong transient that looks like a fishing splash. It is macOS-only and currently separate
+from the main Tk auto-angler loop.
+
 Legacy launcher (kept for backward compatibility):
 
 ```bash
@@ -39,25 +49,55 @@ you launch it from (Terminal, iTerm, VS Code, etc.) in System Settings → Priva
 - Input Monitoring (needed for global hotkeys via `pynput`)
 - Screen Recording (needed for screenshots via `PIL.ImageGrab`)
 
+The experimental audio probe also depends on the same macOS screen/system-audio capture permission path
+because ScreenCaptureKit is what provides application audio.
+
 ## How to Use
 
-When you start AutoAngler, simply click "Start Fishing" or press F12. You have 5 seconds to focus on minecraft and 
-position the crosshair over your target. The software will attempt to find the cursor. It helps to have a 3x3 black wool 
-target during the day as the opencv location method has trouble with the difference in light level. This is the template 
-that opencv uses: ![](autoangler/assets/minecraft_cursor.png). I plan to fix this in a future version.
+When you start AutoAngler, click `Locate Minecraft` once so the app can anchor itself to the Java game window.
+Then click `Start Fishing` or press `F12`. The button path waits 5 seconds so you can refocus Minecraft. `F12`
+starts immediately from inside Minecraft.
+The app restores its last window position on launch.
+The control row also shows whether the line is currently in or out.
+
+Press `F9` to calibrate the cursor tracking box without clicking back to the AutoAngler window. This is useful after the
+line is in the water, since clicking away from Minecraft opens the menu screen. Press `F8` to save the current debug
+preview and log the filename to the active session log. Press `F7` to arm or disarm recording. While armed and fishing,
+AutoAngler writes:
+
+- periodic PNG captures
+- a whole-window raw video (`...-window.mp4`)
+- a debug composite video (`...-debug.mp4`)
+
+Press `M` to mark a manual bite in the session trace when you see a fish hit but AutoAngler does not. Press `R` to mark
+that bite and force an immediate reel/recast cycle. Marks also dump a short frame series into the session folder so you
+can inspect the lead-up and aftermath.
 
 ![](docs/cursor_location.png)
 
-Once the cursor is located, the software will cast and reel automatically. You must position your cursor 
-so that when it casts the bobber is right above the bobber. You can see the bobber in the preview window. 
+Once the window is located, the software casts and reels automatically. Line the cast up so the fishing line and splash
+area sit inside the calibrated tracking box. The left preview shows the full fishing ROI with the tracked box overlaid.
 
 ![](docs/in_action.png)
 
-The image on the right shows you what the computer is looking for. The bobber and line contain pure black.
-When a fish is on the line, the bobber is dropped out of the preview. This is when the software will reel.
+The image on the right shows only the tracked detection box. Dark line pixels stay black against a white background.
+When those dark pixels drop sharply inside that box, the app treats that as a bite and reels.
 
-The threshold is hardcoded right now. In the future, I hope to make it dynamic to account for light level changes or at 
-least make it configurable. If you are missing fish, you might need to adjust the bobber lower in the preview window. 
+The bite trigger now uses a rolling reference from the calibrated tracking box instead of one hardcoded pixel threshold.
+If it still misses fish, recalibrate with `F9` after the line lands.
+
+The debug panel shows the current ROI, tracking box, scored detection box, video filenames, last mark clip, last saved
+capture, last trace file, and the last capture error. While recording is armed, AutoAngler also writes a per-session
+trace CSV with line pixels, trigger threshold, weak-frame count, and bite decisions so you can correlate missed bites
+against the captured frames. For denser PNG capture during testing, set `AUTOANGLER_RECORD_INTERVAL_MS` before launch.
+
+To inspect a frame offline with the current detector, run
+`uv run python -m autoangler.analyze_image /path/to/frame.png`.
+It writes a crop, processed mask, overlay, and JSON summary next to the image.
+
+To replay a recorded session against a detector configuration and append a JSON-LD experiment result, run
+`uv run python -m autoangler.experiment_harness /path/to/session.log --trace /path/to/session-trace.csv --box x1,y1,x2,y2`.
+Results append to `~/.autoangler/experiment-log.jsonld` by default.
 
 From within minecraft to release the cursor you must hit ESC. This also stops fishing. 
 

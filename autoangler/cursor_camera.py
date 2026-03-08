@@ -21,6 +21,12 @@ class CursorCamera:
         Capture image below the cursor, hopefully of the fishing bobber.
         """
         bbox = self.bounding_box(cursor_position)
+        return self.capture_bbox(bbox)
+
+    def capture_bbox(self, bbox: tuple[int, int, int, int], *, magnify: bool = True) -> CursorImage:
+        """
+        Capture an arbitrary screen bbox.
+        """
         bounds = get_virtual_screen_bounds()
         if bounds is not None:
             clamped = bounds.clamp_bbox(bbox)
@@ -29,7 +35,7 @@ class CursorCamera:
             bbox = clamped
 
         capture = ImageGrab.grab(bbox=bbox)
-        original = self.post_process(capture)
+        original = self.post_process(capture, magnify=magnify)
 
         computer = np.clip(original, 0, 1) * 255
         black_pixel_count = int(np.sum(computer == 0))
@@ -38,19 +44,20 @@ class CursorCamera:
             original=original, computer=computer, black_pixel_count=black_pixel_count
         )
 
-    def post_process(self, image) -> cv2.Mat:
+    def post_process(self, image, *, magnify: bool = True) -> cv2.Mat:
         """
         Convert to grayscale and enlarge.
         """
         processed = np.array(image)
         processed = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
-        processed = cv2.resize(
-            processed,
-            None,
-            fx=self._magnification,
-            fy=self._magnification,
-            interpolation=cv2.INTER_CUBIC,
-        )
+        if magnify:
+            processed = cv2.resize(
+                processed,
+                None,
+                fx=self._magnification,
+                fy=self._magnification,
+                interpolation=cv2.INTER_CUBIC,
+            )
         return processed
 
     @staticmethod

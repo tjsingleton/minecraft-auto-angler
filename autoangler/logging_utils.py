@@ -10,6 +10,22 @@ def build_session_log_path(log_dir: Path, session_name: str) -> Path:
     return log_dir / "sessions" / f"{session_name}.log"
 
 
+def build_session_capture_path(log_path: Path, label: str) -> Path:
+    return log_path.with_name(f"{log_path.stem}-{label}.png")
+
+
+def build_session_video_path(log_path: Path, label: str) -> Path:
+    return log_path.with_name(f"{log_path.stem}-{label}.mp4")
+
+
+def build_session_mark_dir(log_path: Path, label: str, index: int) -> Path:
+    return log_path.with_name(f"{log_path.stem}-{label}-{index:02d}")
+
+
+def build_session_trace_path(log_path: Path) -> Path:
+    return log_path.with_name(f"{log_path.stem}-trace.csv")
+
+
 def configure_logging() -> Path | None:
     """
     Configure console + file logging.
@@ -54,6 +70,7 @@ def configure_logging() -> Path | None:
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
+        os.environ["AUTOANGLER_SESSION_LOG"] = str(log_path)
         return log_path
     except Exception:
         return None
