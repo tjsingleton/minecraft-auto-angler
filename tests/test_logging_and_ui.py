@@ -47,7 +47,7 @@ def test_logging_utils_exposes_video_and_mark_path_builders() -> None:
 def test_hotkey_hint_text_includes_expected_keys() -> None:
     text = hotkey_hint_text(hotkeys_enabled=True)
     assert "M" in text
-    assert "R" in text
+    assert "F6" in text
     assert "F7" in text
     assert "F8" in text
     assert "F12" in text
@@ -238,7 +238,7 @@ def test_on_key_press_routes_m_to_manual_mark() -> None:
     assert calls == [(0, marker)]
 
 
-def test_on_key_press_routes_r_to_manual_reel() -> None:
+def test_on_key_press_routes_f6_to_manual_reel() -> None:
     app = AutoFishTkApp()
     calls: list[tuple[int, object]] = []
 
@@ -252,7 +252,7 @@ def test_on_key_press_routes_r_to_manual_reel() -> None:
     app._root = FakeRoot()
     app._mark_reel = marker  # type: ignore[attr-defined]
 
-    app._on_key_press(keyboard.KeyCode.from_char("r"))
+    app._on_key_press(keyboard.Key.f6)
 
     assert calls == [(0, marker)]
 

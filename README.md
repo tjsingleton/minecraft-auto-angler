@@ -69,7 +69,7 @@ AutoAngler writes:
 - a whole-window raw video (`...-window.mp4`)
 - a debug composite video (`...-debug.mp4`)
 
-Press `M` to mark a manual bite in the session trace when you see a fish hit but AutoAngler does not. Press `R` to mark
+Press `M` to mark a manual bite in the session trace when you see a fish hit but AutoAngler does not. Press `F6` to mark
 that bite and force an immediate reel/recast cycle. Marks also dump a short frame series into the session folder so you
 can inspect the lead-up and aftermath.
 

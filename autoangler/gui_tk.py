@@ -50,7 +50,7 @@ DEFAULT_WINDOW_GEOMETRY = "860x440+300+0"
 def hotkey_hint_text(hotkeys_enabled: bool) -> str:
     suffix = "" if hotkeys_enabled else " (global hotkeys disabled)"
     return (
-        f"Hotkeys: M mark | R reel+mark | F7 record | F8 screenshot | F12 start | "
+        f"Hotkeys: M mark | F6 reel+mark | F7 record | F8 screenshot | F12 start | "
         f"F9 calibrate box | ESC stop | F10 exit{suffix}"
     )
 
@@ -200,7 +200,7 @@ class AutoFishTkApp:
         if not self._hotkeys_enabled and sys.platform == "darwin":
             messagebox.showwarning(
                 "Enable Accessibility Permissions",
-                "Global hotkeys (M/F7/F8/F12/F9/ESC/F10) are disabled because this process "
+                "Global hotkeys (M/F6/F7/F8/F12/F9/ESC/F10) are disabled because this process "
                 "is not trusted "
                 "for "
                 "input event monitoring.\n\n"
@@ -1053,7 +1053,7 @@ class AutoFishTkApp:
             root.after(0, self._quit)
         elif getattr(key, "char", "").lower() == "m":
             root.after(0, self._mark_bite)
-        elif getattr(key, "char", "").lower() == "r":
+        elif key == keyboard.Key.f6:
             root.after(0, self._mark_reel)
 
     def _quit(self) -> None:
