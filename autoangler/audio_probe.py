@@ -4,14 +4,21 @@ import argparse
 import json
 import logging
 import os
+import queue
+import re
 import subprocess
 import sys
+import threading
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, TextIO
 
 logger = logging.getLogger(__name__)
+BITE_CANDIDATE_PATTERN = re.compile(
+    r"^BITE_CANDIDATE t=(?P<timestamp>\d+(?:\.\d+)?) "
+    r"rms=(?P<rms>\d+(?:\.\d+)?) peak=(?P<peak>\d+(?:\.\d+)?)$"
+)
 
 
 @dataclass(frozen=True)
@@ -20,6 +27,13 @@ class AudioStats:
     rms: float
     peak: float
     frame_count: int
+
+
+@dataclass(frozen=True)
+class AudioHintEvent:
+    timestamp: float
+    rms: float
+    peak: float
 
 
 class AudioSplashDetector:
@@ -123,6 +137,92 @@ def iter_audio_stats(lines: Iterable[str]) -> Iterator[AudioStats]:
             yield parse_audio_stats_line(line)
         except ValueError:
             logger.warning("Skipping malformed helper output: %s", line)
+
+
+def parse_bite_candidate_line(line: str) -> AudioHintEvent:
+    match = BITE_CANDIDATE_PATTERN.match(line.strip())
+    if match is None:
+        raise ValueError("Invalid bite candidate line")
+    return AudioHintEvent(
+        timestamp=float(match.group("timestamp")),
+        rms=float(match.group("rms")),
+        peak=float(match.group("peak")),
+    )
+
+
+def iter_bite_candidates(lines: Iterable[str]) -> Iterator[AudioHintEvent]:
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            yield parse_bite_candidate_line(line)
+        except ValueError:
+            logger.debug("Skipping non-candidate helper output: %s", line)
+
+
+class AudioHintMonitor:
+    def __init__(
+        self,
+        *,
+        helper_path: Path | None = None,
+        title_hint: str | None = None,
+    ) -> None:
+        self._helper_path = helper_path or default_helper_path()
+        self._title_hint = title_hint or "Minecraft"
+        self._events: queue.SimpleQueue[AudioHintEvent] = queue.SimpleQueue()
+        self._process: subprocess.Popen[str] | None = None
+        self._reader: threading.Thread | None = None
+
+    def start(self) -> bool:
+        if self._process is not None:
+            return True
+        if sys.platform != "darwin":
+            logger.info("Audio hint monitor disabled: supported only on macOS.")
+            return False
+
+        binary = ensure_compiled_helper(self._helper_path)
+        command = build_capture_command(binary, self._title_hint)
+        self._process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        self._reader = threading.Thread(target=self._pump_events, daemon=True)
+        self._reader.start()
+        return True
+
+    def _pump_events(self) -> None:
+        process = self._process
+        if process is None or process.stdout is None:
+            return
+        for event in iter_bite_candidates(process.stdout):
+            self._events.put(event)
+
+    def poll(self) -> list[AudioHintEvent]:
+        events: list[AudioHintEvent] = []
+        while True:
+            try:
+                events.append(self._events.get_nowait())
+            except queue.Empty:
+                return events
+
+    def close(self) -> None:
+        process = self._process
+        if process is None:
+            return
+        if process.poll() is None:
+            process.terminate()
+        stderr_output = ""
+        if process.stderr is not None:
+            stderr_output = process.stderr.read().strip()
+        if stderr_output:
+            logger.info("Audio helper stderr:\n%s", stderr_output)
+        process.wait(timeout=5)
+        self._process = None
+        self._reader = None
 
 
 def run_probe(

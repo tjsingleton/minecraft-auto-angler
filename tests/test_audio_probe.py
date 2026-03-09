@@ -5,12 +5,14 @@ from pathlib import Path
 import pytest
 
 from autoangler.audio_probe import (
+    AudioHintEvent,
     AudioSplashDetector,
     AudioStats,
     build_capture_command,
     build_compile_command,
     compiled_helper_path,
     parse_audio_stats_line,
+    parse_bite_candidate_line,
 )
 
 
@@ -116,3 +118,9 @@ def test_build_capture_command_points_to_compiled_helper() -> None:
         "--title-hint",
         "Minecraft",
     ]
+
+
+def test_parse_bite_candidate_line_reads_probe_output() -> None:
+    event = parse_bite_candidate_line("BITE_CANDIDATE t=12.500 rms=0.0310 peak=0.1900")
+
+    assert event == AudioHintEvent(timestamp=12.5, rms=0.031, peak=0.19)

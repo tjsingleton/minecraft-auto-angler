@@ -9,8 +9,13 @@ from pynput import keyboard
 
 from autoangler.gui_tk import (
     AutoFishTkApp,
+    cast_ratio_text,
+    catch_count_text,
     hotkey_hint_text,
     line_state_text,
+    main_window_minsize,
+    main_window_summary_text,
+    normalized_main_window_geometry,
     tracking_status_text,
 )
 from autoangler.line_watcher import LineWatcher
@@ -62,14 +67,12 @@ def test_logging_utils_exposes_video_and_mark_path_builders() -> None:
 
 def test_hotkey_hint_text_includes_expected_keys() -> None:
     text = hotkey_hint_text(hotkeys_enabled=True)
-    assert "M" in text
-    assert "F6" in text
     assert "F7" in text
     assert "F8" in text
     assert "F12" in text
     assert "F9" in text
-    assert "ESC" in text
     assert "F10" in text
+    assert "Cmd+Q" in text
 
 
 def test_hotkey_hint_text_reports_when_hotkeys_disabled() -> None:
@@ -80,6 +83,37 @@ def test_hotkey_hint_text_reports_when_hotkeys_disabled() -> None:
 def test_line_state_text_reports_in_and_out() -> None:
     assert line_state_text(is_line_out=False) == "Line: In"
     assert line_state_text(is_line_out=True) == "Line: Out"
+
+
+def test_catch_count_text_is_number_only() -> None:
+    assert catch_count_text(7) == "7"
+
+
+def test_cast_ratio_text_reports_bites_over_casts() -> None:
+    assert cast_ratio_text(bites=3, casts=11) == "3 / 11"
+
+
+def test_main_window_minsize_tracks_preview_dimensions() -> None:
+    width, height = main_window_minsize()
+
+    assert width <= 400
+    assert 320 <= height <= 340
+
+
+def test_main_window_summary_text_uses_integer_tick_without_label() -> None:
+    assert main_window_summary_text(fps=22.4, tick_ms=43.5) == "FPS 22.4 | 44ms"
+
+
+def test_main_window_resize_policy_disables_manual_resize() -> None:
+    assert AutoFishTkApp._main_window_resizable() == (False, False)
+
+
+def test_normalized_main_window_geometry_keeps_saved_position_only() -> None:
+    width, height = main_window_minsize()
+
+    geometry = normalized_main_window_geometry("900x500+120+340")
+
+    assert geometry == f"{width}x{height}+120+340"
 
 
 def test_tracking_status_text_shows_weak_frame_progress_and_bite_state() -> None:
@@ -151,6 +185,48 @@ def test_toggle_recording_flips_recording_state() -> None:
 
     app._toggle_recording()
     assert app._recording_enabled is False
+
+
+def test_toggle_topmost_flips_window_state_and_updates_root() -> None:
+    app = AutoFishTkApp()
+    calls: list[tuple[str, bool]] = []
+
+    class FakeRoot:
+        def attributes(self, name: str, value: bool) -> None:
+            calls.append((name, value))
+
+    app._root = FakeRoot()
+
+    app._toggle_topmost()
+    app._toggle_topmost()
+
+    assert calls == [("-topmost", False), ("-topmost", True)]
+
+
+def test_auto_strafe_defaults_enabled() -> None:
+    app = AutoFishTkApp()
+
+    assert app._auto_strafe_enabled is True
+
+
+def test_toggle_auto_strafe_uses_checkbox_state() -> None:
+    app = AutoFishTkApp()
+
+    class FakeVar:
+        def __init__(self, value: bool) -> None:
+            self._value = value
+
+        def get(self) -> bool:
+            return self._value
+
+        def set(self, value: bool) -> None:
+            self._value = value
+
+    app._auto_strafe_var = FakeVar(False)
+
+    app._toggle_auto_strafe()
+
+    assert app._auto_strafe_enabled is False
 
 
 def test_toggle_recording_closes_session_recorder_when_disabling() -> None:
@@ -248,6 +324,18 @@ def test_hotkey_start_skips_five_second_delay() -> None:
     assert app._button.text == "Stop Fishing"
 
 
+def test_hotkey_toggle_stops_when_already_fishing() -> None:
+    app = AutoFishTkApp()
+    calls: list[str] = []
+
+    app._is_fishing = True
+    app._stop = lambda: calls.append("stop")  # type: ignore[method-assign]
+
+    app._toggle_fishing()
+
+    assert calls == ["stop"]
+
+
 def test_tick_uses_delayed_recast_after_bite() -> None:
     app = AutoFishTkApp()
     calls: list[str] = []
@@ -259,7 +347,7 @@ def test_tick_uses_delayed_recast_after_bite() -> None:
     app._root = FakeRoot()
     app._is_fish_on = lambda: True  # type: ignore[method-assign]
     app._should_capture_preview = lambda: False  # type: ignore[method-assign]
-    app._reel_and_recast = lambda: calls.append("recast")  # type: ignore[method-assign]
+    app._reel_and_recast = lambda **_kwargs: calls.append("recast")  # type: ignore[method-assign]
 
     app._tick()
 
@@ -286,6 +374,22 @@ def test_debug_details_text_includes_profile_metrics() -> None:
     assert "preview:1.8ms" in text
     assert "rec:1.1ms" in text
     assert "rss:64.0MB" in text
+
+
+def test_debug_stats_text_groups_sections() -> None:
+    app = AutoFishTkApp()
+    app._recording_enabled = True
+    app._rod_in_hand = True
+    app._catch_count = 2
+
+    text = app._debug_stats_text()
+
+    assert "Status" in text
+    assert "Detection" in text
+    assert "Recording" in text
+    assert "Performance" in text
+    assert "catch_count: 2" in text
+    assert "rod_in_hand: 1" in text
 
 
 def test_maybe_log_profile_emits_periodic_profile_line(monkeypatch) -> None:
@@ -321,6 +425,30 @@ def test_debug_details_text_reports_top_stage() -> None:
     assert "top:capture" in text
 
 
+def test_maybe_refresh_tracking_context_recalibrates_when_window_geometry_changes(
+    monkeypatch,
+) -> None:
+    app = AutoFishTkApp()
+    app._minecraft_window = type(
+        "Window",
+        (),
+        {"title": "Minecraft", "left": 10, "top": 20, "width": 100, "height": 80},
+    )()
+    calls: list[str] = []
+    new_window = type(
+        "Window",
+        (),
+        {"title": "Minecraft", "left": 15, "top": 25, "width": 100, "height": 80},
+    )()
+
+    monkeypatch.setattr("autoangler.gui_tk.selected_minecraft_window", lambda: new_window)
+    monkeypatch.setattr(app, "_refresh_tracking_context", lambda: calls.append("refresh"))
+
+    app._maybe_refresh_tracking_context(now=10.0)
+
+    assert calls == ["refresh"]
+
+
 def test_debug_details_text_includes_recording_and_candidate_details() -> None:
     app = AutoFishTkApp()
     app._recording_enabled = True
@@ -347,7 +475,7 @@ def test_debug_details_text_includes_recording_and_candidate_details() -> None:
     assert "last_error:boom" in text
 
 
-def test_on_key_press_routes_m_to_manual_mark() -> None:
+def test_on_key_press_routes_f8_to_manual_action() -> None:
     app = AutoFishTkApp()
     calls: list[tuple[int, object]] = []
 
@@ -359,14 +487,14 @@ def test_on_key_press_routes_m_to_manual_mark() -> None:
         return None
 
     app._root = FakeRoot()
-    app._mark_bite = marker  # type: ignore[method-assign]
+    app._manual_action = marker  # type: ignore[method-assign]
 
-    app._on_key_press(keyboard.KeyCode.from_char("m"))
+    app._on_key_press(keyboard.Key.f8)
 
     assert calls == [(0, marker)]
 
 
-def test_on_key_press_routes_f6_to_manual_reel() -> None:
+def test_on_key_press_ignores_removed_f6_hotkey() -> None:
     app = AutoFishTkApp()
     calls: list[tuple[int, object]] = []
 
@@ -374,32 +502,85 @@ def test_on_key_press_routes_f6_to_manual_reel() -> None:
         def after(self, delay_ms: int, callback) -> None:
             calls.append((delay_ms, callback))
 
-    def marker() -> None:
-        return None
-
     app._root = FakeRoot()
-    app._mark_reel = marker  # type: ignore[attr-defined]
 
     app._on_key_press(keyboard.Key.f6)
 
-    assert calls == [(0, marker)]
+    assert calls == []
+
+
+def test_on_key_press_routes_f10_to_debug_window_toggle() -> None:
+    app = AutoFishTkApp()
+    calls: list[tuple[int, object]] = []
+
+    class FakeRoot:
+        def after(self, delay_ms: int, callback) -> None:
+            calls.append((delay_ms, callback))
+
+    def toggle() -> None:
+        return None
+
+    app._root = FakeRoot()
+    app._toggle_debug_window = toggle  # type: ignore[attr-defined]
+
+    app._on_key_press(keyboard.Key.f10)
+
+    assert calls == [(0, toggle)]
+
+
+def test_on_key_press_ignores_removed_m_hotkey() -> None:
+    app = AutoFishTkApp()
+    calls: list[tuple[int, object]] = []
+
+    class FakeRoot:
+        def after(self, delay_ms: int, callback) -> None:
+            calls.append((delay_ms, callback))
+
+    app._root = FakeRoot()
+
+    app._on_key_press(keyboard.KeyCode.from_char("m"))
+
+    assert calls == []
 
 
 def test_load_window_geometry_uses_saved_geometry(tmp_path: Path, monkeypatch) -> None:
     app = AutoFishTkApp()
     state_path = tmp_path / "window.json"
-    state_path.write_text(json.dumps({"geometry": "900x500+120+340"}))
+    state_path.write_text(json.dumps({"geometry": "900x500+120+340", "topmost": False}))
     monkeypatch.setattr(app, "_window_state_path", lambda: state_path)
 
     geometry = app._load_window_geometry()
 
-    assert geometry == "900x500+120+340"
+    assert geometry == normalized_main_window_geometry("900x500+120+340")
+    assert app._topmost_enabled is False
+
+
+def test_load_window_geometry_prefers_saved_position(tmp_path: Path, monkeypatch) -> None:
+    app = AutoFishTkApp()
+    state_path = tmp_path / "window.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "geometry": "900x500+0+0",
+                "position": "+120+340",
+                "topmost": False,
+            }
+        )
+    )
+    monkeypatch.setattr(app, "_window_state_path", lambda: state_path)
+
+    geometry = app._load_window_geometry()
+
+    width, height = main_window_minsize()
+    assert geometry == f"{width}x{height}+120+340"
+    assert app._topmost_enabled is False
 
 
 def test_save_window_geometry_writes_state_file(tmp_path: Path, monkeypatch) -> None:
     app = AutoFishTkApp()
     state_path = tmp_path / "window.json"
     monkeypatch.setattr(app, "_window_state_path", lambda: state_path)
+    app._topmost_enabled = False
 
     class FakeRoot:
         @staticmethod
@@ -411,7 +592,11 @@ def test_save_window_geometry_writes_state_file(tmp_path: Path, monkeypatch) -> 
     path = app._save_window_geometry()
 
     assert path == state_path
-    assert json.loads(state_path.read_text()) == {"geometry": "900x500+120+340"}
+    assert json.loads(state_path.read_text()) == {
+        "geometry": "900x500+120+340",
+        "position": "+120+340",
+        "topmost": False,
+    }
 
 
 def test_sync_line_state_indicator_updates_var() -> None:

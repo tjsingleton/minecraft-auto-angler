@@ -1,0 +1,7 @@
+{
+  "labels": ["positive", "negative", "near_miss"],
+  "schema": {
+    "required": ["path", "label", "expected_trigger_s", "notes"]
+  },
+  "samples": []
+}

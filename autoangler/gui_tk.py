@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import sys
 from csv import DictWriter
+from importlib import resources
 from pathlib import Path
-from time import monotonic, time
+from time import monotonic, sleep, time
 from typing import Any
 
 import cv2
@@ -21,6 +23,7 @@ try:
 except ImportError:  # pragma: no cover - Windows
     resource = None  # type: ignore[assignment]
 
+from autoangler.audio_probe import AudioHintEvent, AudioHintMonitor
 from autoangler.capture_backend import create_capture_backend
 from autoangler.cursor_camera import CursorCamera
 from autoangler.cursor_image import CursorImage
@@ -38,12 +41,14 @@ from autoangler.logging_utils import (
 )
 from autoangler.minecraft_window import WindowInfo, selected_minecraft_window
 from autoangler.profiling import RollingProfiler, TickProfile
+from autoangler.rod_detector import RodDetector
 from autoangler.roi import (
     clamp_roi_to_window,
     cursor_anchor_in_roi,
     default_fishing_roi,
     window_relative_box,
 )
+from autoangler.runtime_config import DelayRange, RuntimeConfig
 from autoangler.screen import get_virtual_screen_bounds
 from autoangler.session_recorder import SessionRecorder
 
@@ -57,15 +62,49 @@ MINECRAFT_IRL_MINUTES_PER_MC_HOUR = MINECRAFT_IRL_MINUTES_PER_MC_DAY / 24
 MINECRAFT_IRL_SECONDS_PER_MC_HOUR = MINECRAFT_IRL_MINUTES_PER_MC_HOUR * 60
 
 logger = logging.getLogger(__name__)
-DEFAULT_WINDOW_GEOMETRY = "860x440+300+0"
+DEFAULT_WINDOW_GEOMETRY = "384x328+300+0"
+AUTO_STRAFE_DURATION = DelayRange(minimum_ms=100, maximum_ms=250)
 
 
 def hotkey_hint_text(hotkeys_enabled: bool) -> str:
     suffix = "" if hotkeys_enabled else " (global hotkeys disabled)"
     return (
-        f"Hotkeys: M mark | F6 reel+mark | F7 record | F8 screenshot | F12 start | "
-        f"F9 calibrate box | ESC stop | F10 exit{suffix}"
+        "Hotkeys: F7 record | F8 manual cast/reel + detector mark | "
+        f"F9 locate+calibrate | F10 debug | F12 start/stop | ESC stop | Cmd+Q exit{suffix}"
     )
+
+
+def catch_count_text(count: int) -> str:
+    return str(count)
+
+
+def cast_ratio_text(*, bites: int, casts: int) -> str:
+    return f"{bites} / {casts}"
+
+
+def main_window_minsize() -> tuple[int, int]:
+    from autoangler.image_viewer_tk import PREVIEW_MAX_HEIGHT, PREVIEW_MAX_WIDTH
+
+    return PREVIEW_MAX_WIDTH + 24, PREVIEW_MAX_HEIGHT + 88
+
+
+def main_window_summary_text(*, fps: float, tick_ms: float) -> str:
+    return f"FPS {fps:.1f} | {int(round(tick_ms))}ms"
+
+
+def normalized_main_window_geometry(saved_geometry: str) -> str:
+    width, height = main_window_minsize()
+    position = window_position_from_geometry(saved_geometry)
+    if position is None:
+        return DEFAULT_WINDOW_GEOMETRY
+    return f"{width}x{height}{position}"
+
+
+def window_position_from_geometry(geometry: str) -> str | None:
+    match = re.fullmatch(r"\d+x\d+([+-]\d+)([+-]\d+)", geometry.strip())
+    if match is None:
+        return None
+    return f"{match.group(1)}{match.group(2)}"
 
 
 def line_state_text(*, is_line_out: bool) -> str:
@@ -93,8 +132,19 @@ def tracking_status_text(
 
 
 class AutoFishTkApp:
-    def __init__(self) -> None:
+    @staticmethod
+    def _main_window_resizable() -> tuple[bool, bool]:
+        return False, False
+
+    def __init__(
+        self,
+        *,
+        runtime_config: RuntimeConfig | None = None,
+        audio_monitor: AudioHintMonitor | None = None,
+    ) -> None:
         self._magnification: int = 10
+        self._runtime_config = runtime_config or RuntimeConfig()
+        self._random = random.Random()
 
         self._cursor_position: tuple[int, int] | None = None
         self._is_fishing = False
@@ -113,8 +163,11 @@ class AutoFishTkApp:
         self._last_effective_fps = 0.0
         self._last_rss_mb: float | None = None
         self._last_profile_log_at = 0.0
+        self._last_context_refresh_at = 0.0
+        self._last_bite_indicator_at = 0.0
 
         self._viewer: Any | None = None
+        self._debug_viewer: Any | None = None
         self._capture_backend = create_capture_backend()
         self._camera = CursorCamera(
             self._magnification,
@@ -123,6 +176,7 @@ class AutoFishTkApp:
         self._cursor_locator = CursorLocator(capture_backend=self._capture_backend)
         self._cursor_image = self._camera.blank()
         self._line_detector = FishingLineDetector()
+        self._rod_detector = RodDetector()
         self._line_watcher = LineWatcher()
         self._minecraft_window: WindowInfo | None = None
         self._fishing_roi: tuple[int, int, int, int] | None = None
@@ -131,17 +185,31 @@ class AutoFishTkApp:
         self._line_candidate: LineCandidate | None = None
         self._line_pixels = 0
         self._bite_detected = False
+        self._rod_in_hand = False
+        self._catch_count = 0
+        self._cast_count = 0
+        self._topmost_enabled = True
 
         self._root: Any | None = None
+        self._debug_window: Any | None = None
         self._status_var: Any | None = None
         self._line_state_var: Any | None = None
         self._debug_var: Any | None = None
+        self._summary_var: Any | None = None
+        self._catch_var: Any | None = None
+        self._recording_dot: Any | None = None
+        self._fishing_dot: Any | None = None
+        self._bite_dot: Any | None = None
+        self._topmost_var: Any | None = None
+        self._cod_icon: Any | None = None
         self._button: Any | None = None
         self._locate_button: Any | None = None
         self._calibrate_button: Any | None = None
         self._record_button: Any | None = None
         self._session_button: Any | None = None
         self._hotkey_hint_var: Any | None = None
+        self._auto_strafe_var: Any | None = None
+        self._auto_strafe_enabled = self._runtime_config.auto_strafe_enabled
 
         self._keyboard_listener = keyboard.Listener(on_press=self._on_key_press)
         self._hotkeys_enabled = False
@@ -157,6 +225,9 @@ class AutoFishTkApp:
         self._session_recorder: SessionRecorder | None = None
         self._latest_window_frame: np.ndarray | None = None
         self._latest_debug_composite: np.ndarray | None = None
+        self._audio_monitor = audio_monitor
+        self._audio_monitor_started = False
+        self._last_audio_hint: AudioHintEvent | None = None
 
     def run(self) -> None:
         import tkinter as tk
@@ -167,86 +238,172 @@ class AutoFishTkApp:
         root = tk.Tk()
         root.title("MC AutoAngler")
         root.geometry(self._load_window_geometry())
-        root.minsize(860, 440)
-        root.attributes("-topmost", True)
+        root.minsize(*main_window_minsize())
+        root.resizable(*self._main_window_resizable())
+        root.attributes("-topmost", self._topmost_enabled)
         root.protocol("WM_DELETE_WINDOW", self._quit)
+        root.bind("<Command-q>", lambda _event: self._quit())
+        root.bind("<Command-Q>", lambda _event: self._quit())
 
+        self._topmost_var = tk.BooleanVar(value=self._topmost_enabled)
+        self._status_var = tk.StringVar(value="")
+        self._line_state_var = tk.StringVar(value=line_state_text(is_line_out=self._is_line_out))
+        self._summary_var = tk.StringVar(value="FPS -- | Tick --")
+        self._catch_var = tk.StringVar(value=cast_ratio_text(bites=0, casts=0))
+        self._debug_var = tk.StringVar(value=self._debug_stats_text())
+        self._auto_strafe_var = tk.BooleanVar(value=self._auto_strafe_enabled)
+
+        root.config(menu=self._build_menu(root))
         container = ttk.Frame(root, padding=8)
         container.pack(fill="both", expand=True)
 
-        self._viewer = ImageViewerTk()
+        self._viewer = ImageViewerTk(dual=False)
         self._viewer.frame(container).pack(fill="both", expand=True)
 
-        controls = ttk.Frame(container)
-        controls.pack(fill="x", pady=(0, 8))
+        status_row = ttk.Frame(container)
+        status_row.pack(fill="x", pady=(8, 0))
+        self._recording_dot = self._build_indicator(status_row, label="Rec")
+        self._fishing_dot = self._build_indicator(status_row, label="Fishing")
+        self._bite_dot = self._build_indicator(status_row, label="Bite")
+        try:
+            icon_path = resources.files("autoangler.assets").joinpath("Cod.gif")
+            self._cod_icon = tk.PhotoImage(file=str(icon_path)).subsample(14, 14)
+        except Exception:
+            self._cod_icon = None
+        ttk.Label(status_row, image=self._cod_icon).pack(side="left", padx=(0, 4))
+        ttk.Label(status_row, textvariable=self._catch_var).pack(side="left", padx=(0, 12))
+        ttk.Label(status_row, textvariable=self._summary_var).pack(side="left")
 
-        self._locate_button = ttk.Button(
-            controls, text="Locate Minecraft", command=self._locate_minecraft_window
-        )
-        self._locate_button.pack(side="left", padx=(0, 8))
+        controls_row = ttk.Frame(container)
+        controls_row.pack(fill="x", pady=(6, 0))
+        ttk.Checkbutton(
+            controls_row,
+            text="Auto-Strafe",
+            variable=self._auto_strafe_var,
+            command=self._toggle_auto_strafe,
+        ).pack(side="left")
 
-        self._calibrate_button = ttk.Button(
-            controls, text="Calibrate Box", command=self._calibrate_line
-        )
-        self._calibrate_button.pack(side="left", padx=(0, 8))
-
-        self._record_button = ttk.Button(
-            controls,
-            text="Start Recording",
-            command=self._toggle_recording,
-        )
-        self._record_button.pack(side="left", padx=(0, 8))
-
-        self._session_button = ttk.Button(
-            controls,
-            text="Open Sessions",
-            command=self._open_session_folder,
-        )
-        self._session_button.pack(side="left", padx=(0, 8))
-
-        self._button = ttk.Button(controls, text="Start Fishing", command=self._toggle_fishing)
-        self._button.pack(side="left")
-
-        self._status_var = tk.StringVar(value="")
-        ttk.Label(controls, textvariable=self._status_var).pack(side="left", padx=12)
-        self._line_state_var = tk.StringVar(value=line_state_text(is_line_out=self._is_line_out))
-        ttk.Label(controls, textvariable=self._line_state_var).pack(side="left", padx=(0, 12))
-
-        self._hotkey_hint_var = tk.StringVar(value=hotkey_hint_text(hotkeys_enabled=False))
-        ttk.Label(container, textvariable=self._hotkey_hint_var).pack(anchor="w", pady=(0, 4))
-
-        self._debug_var = tk.StringVar(value=self._debug_details_text())
-        ttk.Label(
-            container,
-            textvariable=self._debug_var,
-            justify="left",
-            font="TkFixedFont",
-        ).pack(anchor="w", pady=(0, 4))
-
-        self._viewer.update(self._cursor_image)
-        self._sync_line_state_indicator()
+        self._build_debug_window(root)
+        self._viewer.update(self._cursor_image.original)
+        self._refresh_ui_state()
 
         self._root = root
         self._hotkeys_enabled = self._try_enable_hotkeys()
         logger.info("Hotkeys enabled: %s", self._hotkeys_enabled)
         logger.info("Capture backend: %s", self._capture_backend.backend_name)
-        if self._hotkey_hint_var is not None:
-            self._hotkey_hint_var.set(hotkey_hint_text(hotkeys_enabled=self._hotkeys_enabled))
+        logger.info("Runtime config: %s", self._runtime_config.metadata())
+        self._ensure_audio_monitor()
         if not self._hotkeys_enabled and sys.platform == "darwin":
             messagebox.showwarning(
                 "Enable Accessibility Permissions",
-                "Global hotkeys (M/F6/F7/F8/F12/F9/ESC/F10) are disabled because this process "
+                "Global hotkeys (F7/F8/F9/F10/F12/ESC) are disabled because this process "
                 "is not trusted "
                 "for "
                 "input event monitoring.\n\n"
                 "Fix: System Settings → Privacy & Security → Accessibility and Input Monitoring → "
                 "enable your Terminal/IDE (the app you used to launch AutoAngler), then restart it."
                 "\n\n"
-                "You can still use the Start/Stop button.",
+                "You can still use the menu bar.",
             )
 
+        self._refresh_tracking_context()
         self._tick()
         root.mainloop()
+
+    @staticmethod
+    def _build_indicator(parent, *, label: str):
+        import tkinter as tk
+        from tkinter import ttk
+
+        frame = ttk.Frame(parent)
+        frame.pack(side="left", padx=(0, 12))
+        dot = tk.Canvas(frame, width=12, height=12, highlightthickness=0)
+        dot.create_oval(2, 2, 10, 10, fill="#555555", outline="")
+        dot.pack(side="left")
+        ttk.Label(frame, text=label).pack(side="left", padx=(4, 0))
+        return dot
+
+    def _build_menu(self, root):
+        import tkinter as tk
+
+        menu = tk.Menu(root)
+        file_menu = tk.Menu(menu, tearoff=False)
+        file_menu.add_command(label="Exit", accelerator="Cmd+Q", command=self._quit)
+        menu.add_cascade(label="File", menu=file_menu)
+
+        view_menu = tk.Menu(menu, tearoff=False)
+        view_menu.add_checkbutton(
+            label="Always On Top",
+            variable=self._topmost_var,
+            command=self._toggle_topmost,
+        )
+        view_menu.add_command(
+            label="Debug Window",
+            accelerator="F10",
+            command=self._toggle_debug_window,
+        )
+        menu.add_cascade(label="View", menu=view_menu)
+        return menu
+
+    def _build_debug_window(self, root) -> None:
+        import tkinter as tk
+        from tkinter import ttk
+
+        from autoangler.image_viewer_tk import ImageViewerTk
+
+        window = tk.Toplevel(root)
+        window.title("MC AutoAngler Debug")
+        window.attributes("-topmost", self._topmost_enabled)
+        window.protocol("WM_DELETE_WINDOW", window.withdraw)
+
+        container = ttk.Frame(window, padding=8)
+        container.pack(fill="both", expand=True)
+
+        self._debug_viewer = ImageViewerTk(dual=True)
+        self._debug_viewer.frame(container).pack(fill="both", expand=True)
+
+        ttk.Label(
+            container,
+            textvariable=self._debug_var,
+            justify="left",
+            font="TkFixedFont",
+        ).pack(anchor="w", pady=(8, 0))
+
+        self._debug_window = window
+        window.withdraw()
+
+    def _set_indicator_color(self, canvas: Any | None, color: str) -> None:
+        if canvas is None:
+            return
+        try:
+            canvas.itemconfigure(1, fill=color)
+        except Exception:
+            return
+
+    def _refresh_ui_state(self) -> None:
+        now = monotonic()
+        if self._summary_var is not None:
+            self._summary_var.set(
+                main_window_summary_text(
+                    fps=self._last_effective_fps,
+                    tick_ms=self._last_tick_duration_ms,
+                )
+            )
+        if self._catch_var is not None:
+            self._catch_var.set(cast_ratio_text(bites=self._catch_count, casts=self._cast_count))
+
+        record_color = "#cc2222" if self._recording_enabled and int(now * 2) % 2 == 0 else "#555555"
+        fishing_color = "#1f8f3a" if self._is_fishing else "#555555"
+        bite_color = "#d18b00" if (now - self._last_bite_indicator_at) < 1.0 else "#555555"
+
+        self._set_indicator_color(self._recording_dot, record_color)
+        self._set_indicator_color(self._fishing_dot, fishing_color)
+        self._set_indicator_color(self._bite_dot, bite_color)
+
+        if self._viewer is not None:
+            self._viewer.set_border("#1f8f3a" if self._main_preview_is_valid() else "#8c1d18")
+        if self._debug_var is not None:
+            self._debug_var.set(self._debug_stats_text())
 
     def _try_enable_hotkeys(self) -> bool:
         if sys.platform != "darwin":
@@ -274,6 +431,48 @@ class AutoFishTkApp:
         else:
             self._start()
 
+    def _toggle_fishing_hotkey(self) -> None:
+        if self._is_fishing:
+            self._stop()
+        else:
+            self._start_hotkey()
+
+    def _toggle_topmost(self) -> None:
+        if self._topmost_var is not None and hasattr(self._topmost_var, "get"):
+            self._topmost_enabled = bool(self._topmost_var.get())
+        else:
+            self._topmost_enabled = not self._topmost_enabled
+        if self._root is not None:
+            self._root.attributes("-topmost", self._topmost_enabled)
+        if self._debug_window is not None:
+            try:
+                self._debug_window.attributes("-topmost", self._topmost_enabled)
+            except Exception:
+                pass
+        if self._topmost_var is not None and hasattr(self._topmost_var, "set"):
+            self._topmost_var.set(self._topmost_enabled)
+
+    def _toggle_auto_strafe(self) -> None:
+        if self._auto_strafe_var is not None and hasattr(self._auto_strafe_var, "get"):
+            self._auto_strafe_enabled = bool(self._auto_strafe_var.get())
+        else:
+            self._auto_strafe_enabled = not self._auto_strafe_enabled
+        if self._auto_strafe_var is not None and hasattr(self._auto_strafe_var, "set"):
+            self._auto_strafe_var.set(self._auto_strafe_enabled)
+
+    def _toggle_debug_window(self) -> None:
+        window = self._debug_window
+        if window is None:
+            return
+        try:
+            visible = bool(window.winfo_viewable())
+        except Exception:
+            visible = False
+        if visible:
+            window.withdraw()
+        else:
+            window.deiconify()
+
     def _sync_line_state_indicator(self) -> None:
         if self._line_state_var is not None:
             self._line_state_var.set(line_state_text(is_line_out=self._is_line_out))
@@ -296,7 +495,8 @@ class AutoFishTkApp:
                 "Recording enabled" if self._recording_enabled else "Recording disabled"
             )
         if self._debug_var is not None:
-            self._debug_var.set(self._debug_details_text())
+            self._debug_var.set(self._debug_stats_text())
+        self._refresh_ui_state()
 
     def _start(self) -> None:
         self._begin_start(delay_ms=5000)
@@ -305,7 +505,7 @@ class AutoFishTkApp:
         self._begin_start(delay_ms=0)
 
     def _begin_start(self, *, delay_ms: int) -> None:
-        if self._root is None or self._button is None:
+        if self._root is None:
             return
 
         logger.info("Start fishing requested")
@@ -318,9 +518,13 @@ class AutoFishTkApp:
         self._tick_interval = 0
         self._current_clock = 0.0
         self._bite_detected = False
+        self._catch_count = 0
+        self._cast_count = 0
+        self._last_bite_indicator_at = 0.0
         self._line_watcher.reset()
 
-        self._button.configure(text="Stop Fishing")
+        if self._button is not None:
+            self._button.configure(text="Stop Fishing")
         self._sync_line_state_indicator()
 
         if self._status_var is not None and delay_ms > 0:
@@ -333,7 +537,7 @@ class AutoFishTkApp:
             self._cast_and_begin_tracking()
 
     def _stop(self) -> None:
-        if self._button is None:
+        if self._root is None and self._button is None:
             return
 
         logger.info("Stop fishing requested")
@@ -344,7 +548,8 @@ class AutoFishTkApp:
         self._line_watcher.reset()
 
         if not self._exiting:
-            self._button.configure(text="Start Fishing")
+            if self._button is not None:
+                self._button.configure(text="Start Fishing")
             if self._status_var is not None:
                 self._status_var.set("Stopped")
         self._sync_line_state_indicator()
@@ -388,6 +593,16 @@ class AutoFishTkApp:
         if self._status_var is not None:
             self._status_var.set(f"Window: {window.title or '<untitled>'}")
         return True
+
+    @staticmethod
+    def _window_geometry_signature(window: Any) -> tuple[Any, ...]:
+        return (
+            getattr(window, "title", ""),
+            getattr(window, "left", 0),
+            getattr(window, "top", 0),
+            getattr(window, "width", 0),
+            getattr(window, "height", 0),
+        )
 
     def _calibrate_line(self) -> None:
         if not self._ensure_tracking_context():
@@ -611,6 +826,38 @@ class AutoFishTkApp:
             black_pixel_count=black_pixel_count,
         )
 
+    def _build_main_preview_frame(
+        self,
+        window_frame: np.ndarray,
+        roi_box: tuple[int, int, int, int],
+        roi_frame: np.ndarray,
+    ) -> np.ndarray:
+        del window_frame, roi_box
+        annotated = roi_frame.copy()
+        tracking_box, _tracking_frame = self._tracking_frame(roi_frame)
+        detection_box, _detection_frame = self._detection_frame(roi_frame)
+
+        x1, y1, x2, y2 = tracking_box
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color=0, thickness=1)
+
+        dx1, dy1, dx2, dy2 = detection_box
+        cv2.rectangle(annotated, (dx1, dy1), (dx2, dy2), color=64, thickness=1)
+
+        if self._line_candidate is not None:
+            lx1, ly1, lx2, ly2 = self._line_candidate.bbox
+            cv2.rectangle(annotated, (lx1, ly1), (lx2, ly2), color=96, thickness=1)
+            cv2.circle(annotated, self._line_candidate.center, radius=2, color=96, thickness=-1)
+
+        border_color = 96 if self._main_preview_is_valid() else 0
+        height, width = annotated.shape[:2]
+        cv2.rectangle(annotated, (0, 0), (width - 1, height - 1), color=border_color, thickness=2)
+        return annotated
+
+    def _main_preview_is_valid(self) -> bool:
+        if self._is_line_out:
+            return self._detection_box is not None and self._line_pixels > 0
+        return self._rod_in_hand
+
     def _build_debug_composite(self) -> np.ndarray:
         left = self._to_bgr(self._cursor_image.original)
         right = self._to_bgr(self._cursor_image.computer)
@@ -679,7 +926,7 @@ class AutoFishTkApp:
         if self._status_var is not None:
             self._status_var.set(f"Saved screenshot: {filename.name}")
         if self._debug_var is not None:
-            self._debug_var.set(self._debug_details_text())
+            self._debug_var.set(self._debug_stats_text())
 
     def _open_session_folder(self) -> Path:
         log_path = os.environ.get("AUTOANGLER_SESSION_LOG", "").strip()
@@ -700,7 +947,7 @@ class AutoFishTkApp:
         if self._status_var is not None:
             self._status_var.set(f"Opened sessions: {folder.name}")
         if self._debug_var is not None:
-            self._debug_var.set(self._debug_details_text())
+            self._debug_var.set(self._debug_stats_text())
         return folder
 
     def _window_state_path(self) -> Path:
@@ -712,9 +959,16 @@ class AutoFishTkApp:
         except Exception:
             return DEFAULT_WINDOW_GEOMETRY
 
+        self._topmost_enabled = bool(data.get("topmost", True))
+
+        position = str(data.get("position", "")).strip()
+        if self._is_window_position(position):
+            width, height = main_window_minsize()
+            return f"{width}x{height}{position}"
+
         geometry = str(data.get("geometry", "")).strip()
         if self._is_window_geometry(geometry):
-            return geometry
+            return normalized_main_window_geometry(geometry)
         return DEFAULT_WINDOW_GEOMETRY
 
     def _save_window_geometry(self) -> Path | None:
@@ -728,8 +982,17 @@ class AutoFishTkApp:
 
         state_path = self._window_state_path()
         state_path.parent.mkdir(parents=True, exist_ok=True)
+        position = window_position_from_geometry(geometry)
         state_path.write_text(
-            json.dumps({"geometry": geometry}, indent=2) + "\n",
+            json.dumps(
+                {
+                    "geometry": geometry,
+                    "position": position,
+                    "topmost": self._topmost_enabled,
+                },
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
         logger.info("Saved window geometry %s to %s", geometry, state_path)
@@ -739,31 +1002,71 @@ class AutoFishTkApp:
     def _is_window_geometry(geometry: str) -> bool:
         return re.fullmatch(r"\d+x\d+[+-]\d+[+-]\d+", geometry) is not None
 
-    def _mark_bite(self) -> Path:
+    @staticmethod
+    def _is_window_position(position: str) -> bool:
+        return re.fullmatch(r"[+-]\d+[+-]\d+", position) is not None
+
+    def _mark_bite(self) -> Path | None:
         now = monotonic()
-        path = self._append_trace_row(now=now, event="mark")
+        path = None
+        if self._recording_enabled:
+            path = self._append_trace_row(now=now, event="mark", source="manual")
         self._capture_mark_clip("mark", now=now)
         logger.info("Manual bite mark")
         if self._status_var is not None:
             self._status_var.set("Marked bite")
         if self._debug_var is not None:
-            self._debug_var.set(self._debug_details_text())
+            self._debug_var.set(self._debug_stats_text())
         return path
 
-    def _mark_reel(self) -> Path:
+    def _manual_action(self) -> Path | None:
         now = monotonic()
-        path = self._append_trace_row(now=now, event="mark_reel")
-        self._capture_mark_clip("mark-reel", now=now)
-        logger.info("Manual reel mark")
+        path = None
         if self._is_fishing and self._is_line_out:
-            self._reel_and_recast()
-            status = "Marked bite and reeled"
+            label = "hit" if self._bite_detected else "miss"
+            if self._recording_enabled:
+                path = self._append_trace_row(
+                    now=now,
+                    event="training_reel",
+                    source="training",
+                    training_label=label,
+                )
+            self._capture_mark_clip(f"training-{label}", now=now)
+            self._reel_and_recast(source="training")
+            status = f"Manual reel ({label})"
         else:
-            status = "Marked reel"
+            if self._recording_enabled:
+                path = self._append_trace_row(now=now, event="manual_cast", source="manual")
+            self._capture_mark_clip("manual-cast", now=now)
+            self._cast()
+            status = "Manual cast"
         if self._status_var is not None:
             self._status_var.set(status)
         if self._debug_var is not None:
-            self._debug_var.set(self._debug_details_text())
+            self._debug_var.set(self._debug_stats_text())
+        return path
+
+    def _training_mark_and_reel(self) -> Path | None:
+        now = monotonic()
+        label = "hit" if self._bite_detected else "miss"
+        path = None
+        if self._recording_enabled:
+            path = self._append_trace_row(
+                now=now,
+                event="training_reel",
+                source="training",
+                training_label=label,
+            )
+        self._capture_mark_clip(f"training-{label}", now=now)
+        if self._is_fishing and self._is_line_out:
+            self._reel_and_recast(source="training")
+            status = f"Training reel ({label})"
+        else:
+            status = f"Training mark ({label})"
+        if self._status_var is not None:
+            self._status_var.set(status)
+        if self._debug_var is not None:
+            self._debug_var.set(self._debug_stats_text())
         return path
 
     def _save_screenshot(self, label: str, *, image: np.ndarray | None = None) -> Path:
@@ -798,13 +1101,26 @@ class AutoFishTkApp:
         self._session_recorder.close()
         self._session_recorder = None
 
-    def _append_trace_row(self, *, now: float, event: str) -> Path:
+    def _append_trace_row(
+        self,
+        *,
+        now: float,
+        event: str,
+        source: str = "system",
+        training_label: str = "",
+        scheduled_delay_ms: int | None = None,
+        audio_hint_rms: float | None = None,
+        audio_hint_peak: float | None = None,
+        strafe_direction: str = "",
+        strafe_duration_ms: int | None = None,
+    ) -> Path:
         log_path = os.environ.get("AUTOANGLER_SESSION_LOG", "").strip()
         if log_path:
             trace_path = build_session_trace_path(Path(log_path))
         else:
             trace_path = Path.home() / ".autoangler" / "trace.csv"
 
+        metadata = self._runtime_config.metadata()
         trace_path.parent.mkdir(parents=True, exist_ok=True)
         write_header = not trace_path.exists() or trace_path.stat().st_size == 0
         with trace_path.open("a", encoding="utf-8", newline="") as handle:
@@ -819,6 +1135,21 @@ class AutoFishTkApp:
                     "trigger_pixels",
                     "weak_frames",
                     "bite_detected",
+                    "cast_settle_min_ms",
+                    "cast_settle_max_ms",
+                    "recast_min_ms",
+                    "recast_max_ms",
+                    "audio_hints_enabled",
+                    "auto_strafe_enabled",
+                    "scheduled_delay_ms",
+                    "audio_hint_rms",
+                    "audio_hint_peak",
+                    "strafe_direction",
+                    "strafe_duration_ms",
+                    "source",
+                    "training_label",
+                    "rod_in_hand",
+                    "catch_count",
                 ],
             )
             if write_header:
@@ -833,6 +1164,27 @@ class AutoFishTkApp:
                     "trigger_pixels": self._line_watcher.trigger_pixels,
                     "weak_frames": self._line_watcher.weak_frames,
                     "bite_detected": int(self._bite_detected),
+                    "cast_settle_min_ms": metadata["cast_settle_min_ms"],
+                    "cast_settle_max_ms": metadata["cast_settle_max_ms"],
+                    "recast_min_ms": metadata["recast_min_ms"],
+                    "recast_max_ms": metadata["recast_max_ms"],
+                    "audio_hints_enabled": metadata["audio_hints_enabled"],
+                    "auto_strafe_enabled": int(self._auto_strafe_enabled),
+                    "scheduled_delay_ms": "" if scheduled_delay_ms is None else scheduled_delay_ms,
+                    "audio_hint_rms": (
+                        "" if audio_hint_rms is None else f"{audio_hint_rms:.4f}"
+                    ),
+                    "audio_hint_peak": (
+                        "" if audio_hint_peak is None else f"{audio_hint_peak:.4f}"
+                    ),
+                    "strafe_direction": strafe_direction,
+                    "strafe_duration_ms": (
+                        "" if strafe_duration_ms is None else strafe_duration_ms
+                    ),
+                    "source": source,
+                    "training_label": training_label,
+                    "rod_in_hand": int(self._rod_in_hand),
+                    "catch_count": self._catch_count,
                 }
             )
 
@@ -855,6 +1207,7 @@ class AutoFishTkApp:
         else:
             profile_path = Path.home() / ".autoangler" / "profile.csv"
 
+        metadata = self._runtime_config.metadata()
         profile_path.parent.mkdir(parents=True, exist_ok=True)
         write_header = not profile_path.exists() or profile_path.stat().st_size == 0
         with profile_path.open("a", encoding="utf-8", newline="") as handle:
@@ -862,6 +1215,12 @@ class AutoFishTkApp:
                 handle,
                 fieldnames=[
                     "time_s",
+                    "cast_settle_min_ms",
+                    "cast_settle_max_ms",
+                    "recast_min_ms",
+                    "recast_max_ms",
+                    "audio_hints_enabled",
+                    "auto_strafe_enabled",
                     "is_fishing",
                     "is_line_out",
                     "total_ms",
@@ -878,6 +1237,12 @@ class AutoFishTkApp:
             writer.writerow(
                 {
                     "time_s": f"{now:.3f}",
+                    "cast_settle_min_ms": metadata["cast_settle_min_ms"],
+                    "cast_settle_max_ms": metadata["cast_settle_max_ms"],
+                    "recast_min_ms": metadata["recast_min_ms"],
+                    "recast_max_ms": metadata["recast_max_ms"],
+                    "audio_hints_enabled": metadata["audio_hints_enabled"],
+                    "auto_strafe_enabled": int(self._auto_strafe_enabled),
                     "is_fishing": int(self._is_fishing),
                     "is_line_out": int(self._is_line_out),
                     "total_ms": f"{total_ms:.1f}",
@@ -960,6 +1325,28 @@ class AutoFishTkApp:
             f"last_trace:{last_trace} last_error:{last_error}"
         )
 
+    def _debug_stats_text(self) -> str:
+        return (
+            "Status\n"
+            f"recording: {'on' if self._recording_enabled else 'off'}\n"
+            f"is_fishing: {int(self._is_fishing)}\n"
+            f"is_line_out: {int(self._is_line_out)}\n"
+            f"rod_in_hand: {int(self._rod_in_hand)}\n"
+            f"catch_count: {self._catch_count}\n\n"
+            f"cast_count: {self._cast_count}\n\n"
+            "Detection\n"
+            f"roi: {self._fishing_roi}\n"
+            f"track: {self._tracking_box}\n"
+            f"detect: {self._detection_box}\n"
+            f"line_pixels: {self._line_pixels}\n\n"
+            "Recording\n"
+            f"last_trace: {self._last_trace_name or '-'}\n"
+            f"last_mark: {self._last_mark_clip_name or '-'}\n"
+            f"last_capture: {self._last_saved_capture_name or '-'}\n\n"
+            "Performance\n"
+            f"{self._profile_summary_text()}"
+        )
+
     def _profile_summary_text(self) -> str:
         rss_text = "-" if self._last_rss_mb is None else f"{self._last_rss_mb:.1f}MB"
         top_stage = self._top_profile_stage_text()
@@ -1023,6 +1410,19 @@ class AutoFishTkApp:
         self._last_mark_clip_name = clip_path.name
         return clip_path
 
+    def _set_rod_in_hand(self, value: bool) -> None:
+        if value == self._rod_in_hand:
+            return
+        self._rod_in_hand = value
+        if self._recording_enabled:
+            self._append_trace_row(now=monotonic(), event="rod_state", source="system")
+
+    def _update_rod_state(self, window_frame: np.ndarray) -> None:
+        if self._minecraft_window is None:
+            return
+        detected = self._rod_detector.detect(window_frame, window=self._minecraft_window)
+        self._set_rod_in_hand(detected)
+
     @staticmethod
     def _get_virtual_screen_center() -> tuple[int, int] | None:
         bounds = get_virtual_screen_bounds()
@@ -1047,39 +1447,86 @@ class AutoFishTkApp:
         except Exception:
             return None
 
+    def _choose_delay_ms(self, delay_range: DelayRange) -> int:
+        return delay_range.choose(rng=self._random)
+
     def _cast(self) -> None:
         if self._root is None:
             return
 
         logger.info("Cast")
         self._bite_detected = False
+        self._cast_count += 1
         self._line_watcher.reset()
         self._use_rod()
         if self._recording_enabled:
             self._append_trace_row(now=monotonic(), event="cast")
-        self._root.after(3000, self._mark_line_out)
+        cast_delay_ms = self._choose_delay_ms(self._runtime_config.cast_settle)
+        if self._recording_enabled:
+            self._append_trace_row(
+                now=monotonic(),
+                event="line_out_scheduled",
+                scheduled_delay_ms=cast_delay_ms,
+            )
+        self._root.after(cast_delay_ms, self._mark_line_out)
 
     def _mark_line_out(self) -> None:
         if self._is_fishing:
             self._is_line_out = True
             self._sync_line_state_indicator()
+            if self._recording_enabled:
+                self._append_trace_row(now=monotonic(), event="line_out")
 
-    def _reel(self) -> None:
+    def _reel(self, source: str = "system") -> None:
         logger.info("Reel")
         self._use_rod()
         self._is_line_out = False
         self._sync_line_state_indicator()
         if self._recording_enabled:
-            self._append_trace_row(now=monotonic(), event="reel")
+            self._append_trace_row(now=monotonic(), event="reel", source=source)
 
-    def _reel_and_recast(self) -> None:
-        self._reel()
+    def _reel_and_recast(self, source: str = "system") -> None:
+        self._reel(source=source)
         if self._root is None:
             self._cast()
             return
 
-        recast_delay_ms = int(os.environ.get("AUTOANGLER_RECAST_DELAY_MS", "350"))
-        self._root.after(max(0, recast_delay_ms), self._cast)
+        recast_delay_ms = self._choose_delay_ms(self._runtime_config.recast)
+        recast_delay_ms = self._maybe_auto_strafe(total_delay_ms=recast_delay_ms)
+        if self._recording_enabled:
+            self._append_trace_row(
+                now=monotonic(),
+                event="recast_scheduled",
+                source=source,
+                scheduled_delay_ms=recast_delay_ms,
+            )
+        self._root.after(recast_delay_ms, self._cast)
+
+    def _choose_strafe_direction(self) -> str:
+        return self._random.choice(["left", "right"])
+
+    def _maybe_auto_strafe(self, *, total_delay_ms: int) -> int:
+        if not self._auto_strafe_enabled:
+            return total_delay_ms
+
+        strafe_duration_ms = min(total_delay_ms, self._choose_delay_ms(AUTO_STRAFE_DURATION))
+        direction = self._choose_strafe_direction()
+        key = "a" if direction == "left" else "d"
+        pyautogui.keyDown(key)
+        try:
+            sleep(strafe_duration_ms / 1000)
+        finally:
+            pyautogui.keyUp(key)
+
+        if self._recording_enabled:
+            self._append_trace_row(
+                now=monotonic(),
+                event="strafe",
+                source="auto_strafe",
+                strafe_direction=direction,
+                strafe_duration_ms=strafe_duration_ms,
+            )
+        return max(0, total_delay_ms - strafe_duration_ms)
 
     @staticmethod
     def _use_rod() -> None:
@@ -1095,6 +1542,24 @@ class AutoFishTkApp:
             self._minecraft_window is not None and self._fishing_roi is not None
         )
 
+    def _maybe_refresh_tracking_context(self, *, now: float) -> None:
+        if now - self._last_context_refresh_at < 0.5:
+            return
+        self._last_context_refresh_at = now
+
+        if self._minecraft_window is None:
+            if self._is_fishing:
+                self._refresh_tracking_context()
+            return
+
+        latest = selected_minecraft_window()
+        if latest is None:
+            return
+        if self._window_geometry_signature(latest) != self._window_geometry_signature(
+            self._minecraft_window
+        ):
+            self._refresh_tracking_context()
+
     def _tick(self) -> None:
         if self._root is None:
             return
@@ -1106,6 +1571,7 @@ class AutoFishTkApp:
         record_duration_ms = 0.0
 
         if self._should_capture_preview():
+            self._maybe_refresh_tracking_context(now=monotonic())
             (
                 capture_duration_ms,
                 detect_duration_ms,
@@ -1118,8 +1584,12 @@ class AutoFishTkApp:
             if self._recording_enabled and self._is_fishing:
                 self._append_trace_row(now=tick_now, event="tick")
 
+        self._drain_audio_hints(now=monotonic())
+
         if self._is_fish_on():
-            self._reel_and_recast()
+            self._catch_count += 1
+            self._last_bite_indicator_at = monotonic()
+            self._reel_and_recast(source="vision")
 
         duration_ms = round((monotonic() - start_time) * 1000, 1)
         if self._should_capture_preview():
@@ -1180,7 +1650,7 @@ class AutoFishTkApp:
             if self._status_var is not None:
                 self._status_var.set(status)
             if self._debug_var is not None:
-                self._debug_var.set(self._debug_details_text())
+                self._debug_var.set(self._debug_stats_text())
             logger.debug(
                 (
                     "PROFILE_DETAIL avg_tick_ms=%.1f avg_capture_ms=%.1f "
@@ -1197,9 +1667,10 @@ class AutoFishTkApp:
             )
             self._maybe_log_profile(now=monotonic())
         elif self._debug_var is not None:
-            self._debug_var.set(self._debug_details_text())
+            self._debug_var.set(self._debug_stats_text())
 
         self._sync_line_state_indicator()
+        self._refresh_ui_state()
 
         if not self._exiting:
             self._root.after(33, self._tick)
@@ -1225,7 +1696,7 @@ class AutoFishTkApp:
                 self._cursor_image = self._camera.capture(target)
                 capture_duration_ms = round((monotonic() - capture_start) * 1000, 1)
                 preview_start = monotonic()
-                self._viewer.update(self._cursor_image)
+                self._viewer.update(self._cursor_image.original)
                 preview_duration_ms = round((monotonic() - preview_start) * 1000, 1)
             except Exception:
                 return capture_duration_ms, detect_duration_ms, preview_duration_ms
@@ -1241,6 +1712,7 @@ class AutoFishTkApp:
 
         window_frame = window_image.original
         detect_start = monotonic()
+        self._update_rod_state(window_frame)
         roi_box, roi_frame = self._window_frame_and_roi(window_frame)
         self._line_candidate = self._line_detector.find_line(roi_frame)
         auto_calibrated = False
@@ -1253,22 +1725,78 @@ class AutoFishTkApp:
 
         self._cursor_image = self._build_tracking_preview(window_frame, roi_box, roi_frame)
         self._line_pixels = self._cursor_image.black_pixel_count
+        previous_bite_detected = self._bite_detected
         self._bite_detected = self._line_watcher.observe(
             self._line_pixels,
             active=self._is_fishing and self._is_line_out,
         )
+        if self._bite_detected and not previous_bite_detected:
+            self._record_detection_event(event="bite_detected", source="vision")
         detect_duration_ms = round((monotonic() - detect_start) * 1000, 1)
 
         preview_start = monotonic()
+        main_preview = self._build_main_preview_frame(window_frame, roi_box, roi_frame)
         self._latest_window_frame = window_frame.copy()
         self._latest_debug_composite = self._build_debug_composite()
         if auto_calibrated and self._line_candidate is None:
             self._maybe_save_debug_screenshot("line-miss", image=self._cursor_image.original)
 
-        self._viewer.update(self._cursor_image)
+        self._viewer.update(main_preview)
+        if self._debug_viewer is not None:
+            self._debug_viewer.update(self._cursor_image.original, self._cursor_image.computer)
         preview_duration_ms = round((monotonic() - preview_start) * 1000, 1)
 
         return capture_duration_ms, detect_duration_ms, preview_duration_ms
+
+    def _ensure_audio_monitor(self) -> None:
+        if self._audio_monitor_started or not self._runtime_config.audio_hints_enabled:
+            return
+        if self._audio_monitor is None:
+            self._audio_monitor = AudioHintMonitor(title_hint="Minecraft")
+        try:
+            self._audio_monitor_started = bool(self._audio_monitor.start())
+        except Exception as exc:
+            logger.warning("Could not start audio hint monitor: %s", exc)
+            self._audio_monitor_started = False
+
+    def _drain_audio_hints(self, *, now: float) -> None:
+        if self._audio_monitor is None:
+            return
+        for event in self._audio_monitor.poll():
+            self._last_audio_hint = event
+            self._last_bite_indicator_at = monotonic()
+            logger.info(
+                "Audio bite hint t=%.3f rms=%.4f peak=%.4f",
+                event.timestamp,
+                event.rms,
+                event.peak,
+            )
+            self._record_detection_event(
+                event="audio_hint",
+                source="audio",
+                now=now,
+                audio_hint_rms=event.rms,
+                audio_hint_peak=event.peak,
+            )
+
+    def _record_detection_event(
+        self,
+        *,
+        event: str,
+        source: str,
+        now: float | None = None,
+        audio_hint_rms: float | None = None,
+        audio_hint_peak: float | None = None,
+    ) -> None:
+        if not self._recording_enabled:
+            return
+        self._append_trace_row(
+            now=now if now is not None else monotonic(),
+            event=event,
+            source=source,
+            audio_hint_rms=audio_hint_rms,
+            audio_hint_peak=audio_hint_peak,
+        )
 
     def _is_fish_on(self) -> bool:
         return self._is_fishing and self._is_line_out and self._bite_detected
@@ -1281,19 +1809,20 @@ class AutoFishTkApp:
         if key == keyboard.Key.f7:
             root.after(0, self._toggle_recording)
         elif key == keyboard.Key.f8:
-            root.after(0, self._capture_debug_screenshot)
+            root.after(0, self._manual_action)
         elif key == keyboard.Key.f12:
-            root.after(0, self._start_hotkey)
+            root.after(0, self._toggle_fishing_hotkey)
         elif key == keyboard.Key.f9:
-            root.after(0, self._calibrate_line)
+            root.after(0, self._refresh_tracking_context)
         elif key == keyboard.Key.esc:
             root.after(0, self._stop)
         elif key == keyboard.Key.f10:
-            root.after(0, self._quit)
-        elif getattr(key, "char", "").lower() == "m":
-            root.after(0, self._mark_bite)
-        elif key == keyboard.Key.f6:
-            root.after(0, self._mark_reel)
+            root.after(0, self._toggle_debug_window)
+
+    def _refresh_tracking_context(self) -> None:
+        if not self._locate_minecraft_window():
+            return
+        self._calibrate_line()
 
     def _quit(self) -> None:
         if self._exiting:
@@ -1306,7 +1835,14 @@ class AutoFishTkApp:
             self._keyboard_listener.stop()
         finally:
             self._close_session_recorder()
+            if self._audio_monitor is not None:
+                self._audio_monitor.close()
             self._capture_backend.close()
+            if self._debug_window is not None:
+                try:
+                    self._debug_window.destroy()
+                except Exception:
+                    pass
             if self._root is not None:
                 self._root.destroy()
 

@@ -1,12 +1,24 @@
 # minecraft-auto-angler
 
-A toy project to automate fishing in minecraft.
+A tool for automating, observing, and analyzing Minecraft fishing.
 
 Why?
 
 1. It's an easy source of XP. Unlike a mob farm, fishing doesn't decrease hunger. 
 2. You get treasure enchants. Hello "Mending I" books!
 3. It impresses my kids. 
+
+## Features
+
+- Auto-locates the Minecraft Java window, calibrates the fishing ROI, and refreshes that context when the window moves or resizes.
+- Detects bites from the bobber area with a vision pipeline that tracks line pixels, maintains a rolling reference, and checks rod state when the line is in.
+- Supports optional macOS audio bite hints through a ScreenCaptureKit-based helper so audio splashes can be logged alongside vision detections.
+- Presents a compact Tk operator UI with a live ROI preview, fishing and recording indicators, bite feedback, a catch counter, and a toggleable debug window.
+- Keeps operator controls close at hand with hotkeys for cast or reel, recording, training marks, recalibration, debug view, and fishing start or stop.
+- Records per-session artifacts under `~/.autoangler/sessions/`, including PNG captures, raw window video, debug video, and mark clips around manual labels.
+- Writes structured telemetry for profiling and review, including per-tick timing CSVs, detector trace CSVs, periodic `PROFILE` log lines, and audio-hint metadata.
+- Ships offline analysis tools to inspect a single frame, summarize a recorded session profile, replay a session against detector settings, and collect flame graphs.
+- Exposes timing controls for cast settle and recast delays, plus a selectable screen-capture backend for comparison or fallback testing.
 
 ## Setup and run
 
@@ -15,6 +27,17 @@ Install [uv](https://docs.astral.sh/uv/) (e.g. `curl -LsSf https://astral.sh/uv/
 ```bash
 uv sync
 uv run python -m autoangler
+```
+
+Example run with explicit timing ranges and audio hints:
+
+```bash
+uv run python -m autoangler \
+  --cast-settle-min-ms 2800 \
+  --cast-settle-max-ms 3200 \
+  --recast-min-ms 300 \
+  --recast-max-ms 1000 \
+  --audio-hints
 ```
 
 Optional (recommended for contributors):
@@ -30,8 +53,9 @@ uv run python -m autoangler.audio_probe --title-hint Minecraft
 ```
 
 This probe uses ScreenCaptureKit to target Minecraft app audio and prints `BITE_CANDIDATE` lines when
-it sees a strong transient that looks like a fishing splash. It is macOS-only and currently separate
-from the main Tk auto-angler loop.
+it sees a strong transient that looks like a fishing splash. It is macOS-only. When you launch the Tk
+app with `--audio-hints`, AutoAngler starts the helper in the background and records audio hints
+alongside the vision detector for the same session.
 
 Legacy launcher (kept for backward compatibility):
 
@@ -56,53 +80,71 @@ because ScreenCaptureKit is what provides application audio.
 
 ## How to Use
 
-When you start AutoAngler, click `Locate Minecraft` once so the app can anchor itself to the Java game window.
-Then click `Start Fishing` or press `F12`. The button path waits 5 seconds so you can refocus Minecraft. `F12`
-starts immediately from inside Minecraft.
-The app restores its last window position on launch.
-The control row also shows whether the line is currently in or out.
+When AutoAngler starts, it tries to locate the Minecraft Java window and calibrate the fishing ROI automatically.
+If you move or resize Minecraft, AutoAngler re-runs that locate/calibrate step on the fly. You can also force a manual
+refresh with `F9`.
 
-Press `F9` to calibrate the cursor tracking box without clicking back to the AutoAngler window. This is useful after the
-line is in the water, since clicking away from Minecraft opens the menu screen. Press `F8` to save the current debug
-preview and log the filename to the active session log. Press `F7` to arm or disarm recording. While armed and fishing,
-AutoAngler writes these artifacts into a per-run folder under `~/.autoangler/sessions/<session>/`:
+The main window is now a compact operator view:
+
+- a single ROI preview with the tracking overlays
+- a blinking red recording indicator
+- a green fishing-active indicator
+- a bite indicator
+- a bite-based catch counter
+- only `FPS` and `tick` timing on the top row
+
+The preview border turns green when the current phase has a usable signal and red when the context looks stale or the
+expected signal is missing. When the line is out, that validation comes from the calibrated detection region. When the
+line is in, it comes from the rod-state check.
+
+Use these hotkeys while fishing:
+
+- `F7` toggle recording
+- `F8` manual action: cast when the line is in, reel/recast when the line is out, and log the detector as `hit` or `miss` when reeling
+- `F9` manual locate + calibrate
+- `F10` show or hide the debug window
+- `F12` start or stop fishing
+- `ESC` stop fishing
+- `Cmd+Q` exit AutoAngler
+
+Use the `View` menu to toggle `Always On Top` and to open the debug window without using hotkeys.
+The app restores its last window position and always-on-top preference on launch.
+The main window also includes an `Auto-Strafe` checkbox. When enabled, AutoAngler taps left or right between reel and recast using a short randomized movement.
+
+While recording is armed, AutoAngler writes these artifacts into a per-run folder under `~/.autoangler/sessions/<session>/`:
 
 - periodic PNG captures
 - a whole-window raw video (`...-window.mp4`)
 - a debug composite video (`...-debug.mp4`)
 
-Press `M` to mark a manual bite in the session trace when you see a fish hit but AutoAngler does not. Press `F6` to mark
-that bite and force an immediate reel/recast cycle. Marks also dump a short frame series into the session folder so you
-can inspect the lead-up and aftermath. Use the `Open Sessions` button to jump straight to the current session folder in
-Finder.
-
 ![](docs/cursor_location.png)
 
 Once the window is located, the software casts and reels automatically. Line the cast up so the fishing line and splash
-area sit inside the calibrated tracking box. The left preview shows the full fishing ROI with the tracked box overlaid.
-The default ROI is biased toward the lower-right portion of the Minecraft window because the cast target and rod tend to
-stay there when the camera is fixed.
+area sit inside the calibrated tracking box. The main preview shows only the ROI with the tracked overlays, not the full
+Minecraft window. The default ROI is biased toward the lower-right portion of the Minecraft window because the cast
+target and rod tend to stay there when the camera is fixed.
 
 ![](docs/in_action.png)
 
-The image on the right shows only the tracked detection box. Dark line pixels stay black against a white background.
-When those dark pixels drop sharply inside that box, the app treats that as a bite and reels.
+The debug window shows the full-window overlay, the processed mask, and the formatted debug stats. Dark line pixels stay
+black against a white background in the processed view. When those dark pixels drop sharply inside the scored box,
+AutoAngler treats that as a bite and reels.
 
 The bite trigger now uses a rolling reference from the calibrated tracking box instead of one hardcoded pixel threshold.
-If it still misses fish, recalibrate with `F9` after the line lands.
-After a reel, AutoAngler waits briefly before casting again to avoid colliding with the item you just pulled in. You can
-override that delay with `AUTOANGLER_RECAST_DELAY_MS`.
+If it still misses fish, recalibrate with `F9` after the line lands. Cast settle time and reel-to-recast time come
+from CLI-configured ranges, and recast defaults now randomize from `300ms` to `1000ms`.
 
-The debug panel shows the current ROI, tracking box, scored detection box, video filenames, last mark clip, last saved
-capture, last profile file, last trace file, last capture error, and a live profiling line (`fps`, tick, capture,
-detect, preview, record, top stage, RSS memory). While preview capture is active, AutoAngler writes a per-session
-`...-profile.csv` with those stage timings. While fishing, it also emits periodic `PROFILE ...` log lines. While
-recording is armed, AutoAngler writes a per-session trace CSV with line pixels, trigger threshold, weak-frame count,
-and bite decisions so you can correlate missed bites against the captured frames. For denser PNG capture during
-testing, set `AUTOANGLER_RECORD_INTERVAL_MS` before launch. To change how often profile summaries are logged, set
+The debug window shows the current ROI, tracking box, scored detection box, rod state, capture failures, last artifact
+names, and the detailed profiling line (`fps`, tick, capture, detect, preview, record, top stage, RSS memory`). While
+preview capture is active, AutoAngler writes a per-session `...-profile.csv` with those stage timings and runtime
+timing metadata. While fishing, it also emits periodic `PROFILE ...` log lines. While recording is armed, AutoAngler
+writes a per-session trace CSV with line pixels, trigger threshold, weak-frame count, bite decisions, timing metadata,
+scheduled delays, audio hint values, auto-strafe events, action source, training labels, and catch count so you can
+correlate missed bites against the captured frames. For denser PNG capture during testing, set
+`AUTOANGLER_RECORD_INTERVAL_MS` before launch. To change how often profile summaries are logged, set
 `AUTOANGLER_PROFILE_LOG_INTERVAL_S`.
 
-To summarize a session profile, run
+To summarize a session profile and its trigger sequence, run
 `uv run python -m autoangler.profile_session /path/to/session-profile.csv`.
 
 To capture a sampling-profiler flame graph for a live run, use
@@ -122,8 +164,6 @@ To append a capture-backend benchmark entry from a session profile, run
 Use `--backend pil` when logging a Pillow comparison run.
 
 From within minecraft to release the cursor you must hit ESC. This also stops fishing. 
-
-F10 will exit the software. 
 
 ## Tips
 

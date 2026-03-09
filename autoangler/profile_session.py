@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import json
 from pathlib import Path
@@ -56,6 +57,72 @@ def summarize_profile(profile_csv: Path) -> dict[str, float | str]:
     }
 
 
+def summarize_session(profile_csv: Path) -> dict[str, object]:
+    profile_csv = Path(profile_csv)
+    summary: dict[str, object] = dict(summarize_profile(profile_csv))
+
+    profile_rows = _read_csv_rows(profile_csv)
+    first_profile_row = profile_rows[0] if profile_rows else {}
+    summary["audioHintsEnabled"] = first_profile_row.get("audio_hints_enabled", "0") == "1"
+    summary["autoStrafeEnabled"] = first_profile_row.get("auto_strafe_enabled", "0") == "1"
+    summary["timingConfig"] = {
+        "castSettleMinMs": _parse_int(first_profile_row.get("cast_settle_min_ms")),
+        "castSettleMaxMs": _parse_int(first_profile_row.get("cast_settle_max_ms")),
+        "recastMinMs": _parse_int(first_profile_row.get("recast_min_ms")),
+        "recastMaxMs": _parse_int(first_profile_row.get("recast_max_ms")),
+    }
+
+    trace_csv = _infer_trace_path(profile_csv)
+    if not trace_csv.exists():
+        summary["eventCounts"] = {}
+        summary["triggerSequence"] = []
+        return summary
+
+    trace_rows = _read_csv_rows(trace_csv)
+    counter: collections.Counter[str] = collections.Counter()
+    trigger_sequence: list[dict[str, object]] = []
+    for row in trace_rows:
+        event = row.get("event", "")
+        if not event:
+            continue
+        counter[event] += 1
+        trigger_sequence.append(
+            {
+                "timeS": _parse_float(row.get("time_s")),
+                "event": event,
+                "source": row.get("source", ""),
+                "scheduledDelayMs": _parse_int(row.get("scheduled_delay_ms")),
+                "strafeDirection": row.get("strafe_direction", ""),
+                "strafeDurationMs": _parse_int(row.get("strafe_duration_ms")),
+            }
+        )
+
+    summary["eventCounts"] = dict(counter)
+    summary["triggerSequence"] = trigger_sequence
+    return summary
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    with path.open(encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _infer_trace_path(profile_csv: Path) -> Path:
+    return profile_csv.with_name(profile_csv.name.replace("-profile.csv", "-trace.csv"))
+
+
+def _parse_int(value: str | None) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def _parse_float(value: str | None) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Summarize an AutoAngler per-session profile CSV.",
@@ -63,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("profile_csv", help="Path to a <session>-profile.csv file")
     args = parser.parse_args(argv)
 
-    summary = summarize_profile(Path(args.profile_csv).expanduser())
+    summary = summarize_session(Path(args.profile_csv).expanduser())
     print(json.dumps(summary, indent=2))
     return 0
 
