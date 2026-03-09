@@ -11,11 +11,15 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_can_grab_screenshot() -> None:
-    from PIL import ImageGrab
+    from autoangler.capture_backend import create_capture_backend
 
-    img = ImageGrab.grab()
-    assert img.size[0] > 0
-    assert img.size[1] > 0
+    backend = create_capture_backend()
+    try:
+        img = backend.grab()
+    finally:
+        backend.close()
+    assert img.shape[1] > 0
+    assert img.shape[0] > 0
 
 
 def test_can_create_tk_window() -> None:

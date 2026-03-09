@@ -38,7 +38,10 @@ def test_session_recorder_writes_window_and_debug_videos(
     monkeypatch.setattr(module.cv2, "VideoWriter", FakeWriter)
     monkeypatch.setattr(module.cv2, "VideoWriter_fourcc", lambda *_args: 0)
 
-    recorder = SessionRecorder(tmp_path / "sessions" / "20260308-010000.log", fps=10.0)
+    recorder = SessionRecorder(
+        tmp_path / "sessions" / "20260308-010000" / "20260308-010000.log",
+        fps=10.0,
+    )
     recorder.record_frame(
         now=1.0,
         raw_window_frame=np.full((20, 30), 255, dtype=np.uint8),
@@ -52,8 +55,16 @@ def test_session_recorder_writes_window_and_debug_videos(
     recorder.close()
 
     assert writes == [
-        (tmp_path / "sessions" / "20260308-010000-window.mp4", (30, 20), 2),
-        (tmp_path / "sessions" / "20260308-010000-debug.mp4", (12, 10), 2),
+        (
+            tmp_path / "sessions" / "20260308-010000" / "20260308-010000-window.mp4",
+            (30, 20),
+            2,
+        ),
+        (
+            tmp_path / "sessions" / "20260308-010000" / "20260308-010000-debug.mp4",
+            (12, 10),
+            2,
+        ),
     ]
 
 
@@ -78,7 +89,7 @@ def test_session_recorder_saves_mark_clip_series(
     monkeypatch.setattr(module.cv2, "VideoWriter_fourcc", lambda *_args: 0)
 
     recorder = SessionRecorder(
-        tmp_path / "sessions" / "20260308-010000.log",
+        tmp_path / "sessions" / "20260308-010000" / "20260308-010000.log",
         fps=10.0,
         pre_frames=2,
         post_frames=1,
@@ -102,7 +113,9 @@ def test_session_recorder_saves_mark_clip_series(
     )
     recorder.close()
 
-    assert clip_dir == tmp_path / "sessions" / "20260308-010000-mark-00"
+    assert clip_dir == (
+        tmp_path / "sessions" / "20260308-010000" / "20260308-010000-mark-00"
+    )
     assert clip_dir.exists()
     assert sorted(path.name for path in clip_dir.glob("*.png")) == [
         "frame-000-debug.png",
@@ -112,3 +125,46 @@ def test_session_recorder_saves_mark_clip_series(
         "frame-002-debug.png",
         "frame-002-window.png",
     ]
+
+
+def test_session_recorder_close_is_idempotent_and_clears_buffers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _load_session_recorder_module()
+    SessionRecorder = getattr(module, "SessionRecorder", None)
+    assert SessionRecorder is not None
+
+    releases: list[str] = []
+
+    class FakeWriter:
+        def __init__(self, *_args) -> None:
+            return None
+
+        def write(self, _frame: np.ndarray) -> None:
+            return None
+
+        def release(self) -> None:
+            releases.append("released")
+
+    monkeypatch.setattr(module.cv2, "VideoWriter", FakeWriter)
+    monkeypatch.setattr(module.cv2, "VideoWriter_fourcc", lambda *_args: 0)
+
+    recorder = SessionRecorder(
+        tmp_path / "sessions" / "20260308-010000" / "20260308-010000.log",
+        fps=10.0,
+        pre_frames=2,
+        post_frames=1,
+    )
+    recorder.record_frame(
+        now=1.0,
+        raw_window_frame=np.full((20, 30), 255, dtype=np.uint8),
+        debug_frame=np.zeros((10, 12), dtype=np.uint8),
+    )
+    recorder.mark("mark", now=1.0)
+
+    recorder.close()
+    recorder.close()
+
+    assert releases == ["released", "released"]
+    assert list(recorder._buffer) == []
+    assert recorder._pending == []

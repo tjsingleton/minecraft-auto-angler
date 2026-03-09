@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from csv import DictWriter
 from pathlib import Path
@@ -15,16 +16,28 @@ import numpy as np
 import pyautogui
 from pynput import keyboard
 
+try:
+    import resource
+except ImportError:  # pragma: no cover - Windows
+    resource = None  # type: ignore[assignment]
+
+from autoangler.capture_backend import create_capture_backend
 from autoangler.cursor_camera import CursorCamera
 from autoangler.cursor_image import CursorImage
+from autoangler.cursor_locator import CursorLocator
 from autoangler.line_detector import (
     FishingLineDetector,
     LineCandidate,
     centered_tracking_box,
 )
 from autoangler.line_watcher import LineWatcher
-from autoangler.logging_utils import build_session_capture_path, build_session_trace_path
+from autoangler.logging_utils import (
+    build_session_capture_path,
+    build_session_profile_path,
+    build_session_trace_path,
+)
 from autoangler.minecraft_window import WindowInfo, selected_minecraft_window
+from autoangler.profiling import RollingProfiler, TickProfile
 from autoangler.roi import (
     clamp_roi_to_window,
     cursor_anchor_in_roi,
@@ -88,14 +101,26 @@ class AutoFishTkApp:
         self._is_line_out = False
         self._exiting = False
 
-        self._loop_index: int = 0
-        self._loop_durations_ms = np.zeros(100)
+        self._profiler = RollingProfiler(capacity=100)
         self._tick_interval: int = 0
         self._current_clock: float = 0.0
         self._start_clock: float | None = None
+        self._last_tick_duration_ms = 0.0
+        self._last_capture_duration_ms = 0.0
+        self._last_detect_duration_ms = 0.0
+        self._last_preview_duration_ms = 0.0
+        self._last_record_duration_ms = 0.0
+        self._last_effective_fps = 0.0
+        self._last_rss_mb: float | None = None
+        self._last_profile_log_at = 0.0
 
         self._viewer: Any | None = None
-        self._camera = CursorCamera(self._magnification)
+        self._capture_backend = create_capture_backend()
+        self._camera = CursorCamera(
+            self._magnification,
+            capture_backend=self._capture_backend,
+        )
+        self._cursor_locator = CursorLocator(capture_backend=self._capture_backend)
         self._cursor_image = self._camera.blank()
         self._line_detector = FishingLineDetector()
         self._line_watcher = LineWatcher()
@@ -115,6 +140,7 @@ class AutoFishTkApp:
         self._locate_button: Any | None = None
         self._calibrate_button: Any | None = None
         self._record_button: Any | None = None
+        self._session_button: Any | None = None
         self._hotkey_hint_var: Any | None = None
 
         self._keyboard_listener = keyboard.Listener(on_press=self._on_key_press)
@@ -125,6 +151,7 @@ class AutoFishTkApp:
         self._recording_enabled = False
         self._last_recording_capture_at = 0.0
         self._last_saved_capture_name: str | None = None
+        self._last_profile_name: str | None = None
         self._last_trace_name: str | None = None
         self._last_mark_clip_name: str | None = None
         self._session_recorder: SessionRecorder | None = None
@@ -170,6 +197,13 @@ class AutoFishTkApp:
         )
         self._record_button.pack(side="left", padx=(0, 8))
 
+        self._session_button = ttk.Button(
+            controls,
+            text="Open Sessions",
+            command=self._open_session_folder,
+        )
+        self._session_button.pack(side="left", padx=(0, 8))
+
         self._button = ttk.Button(controls, text="Start Fishing", command=self._toggle_fishing)
         self._button.pack(side="left")
 
@@ -195,6 +229,7 @@ class AutoFishTkApp:
         self._root = root
         self._hotkeys_enabled = self._try_enable_hotkeys()
         logger.info("Hotkeys enabled: %s", self._hotkeys_enabled)
+        logger.info("Capture backend: %s", self._capture_backend.backend_name)
         if self._hotkey_hint_var is not None:
             self._hotkey_hint_var.set(hotkey_hint_text(hotkeys_enabled=self._hotkeys_enabled))
         if not self._hotkeys_enabled and sys.platform == "darwin":
@@ -249,8 +284,7 @@ class AutoFishTkApp:
             self._last_recording_capture_at = 0.0
             logger.info("Recording enabled")
         else:
-            if self._session_recorder is not None:
-                self._session_recorder.finish_clips()
+            self._close_session_recorder()
             logger.info("Recording disabled")
 
         if self._record_button is not None:
@@ -647,6 +681,28 @@ class AutoFishTkApp:
         if self._debug_var is not None:
             self._debug_var.set(self._debug_details_text())
 
+    def _open_session_folder(self) -> Path:
+        log_path = os.environ.get("AUTOANGLER_SESSION_LOG", "").strip()
+        if log_path:
+            folder = Path(log_path).expanduser().resolve().parent
+        else:
+            folder = (Path.home() / ".autoangler" / "sessions").resolve()
+        folder.mkdir(parents=True, exist_ok=True)
+
+        if sys.platform == "darwin":
+            subprocess.run(["open", str(folder)], check=False)
+        elif sys.platform == "win32":
+            os.startfile(str(folder))  # type: ignore[attr-defined]
+        else:
+            subprocess.run(["xdg-open", str(folder)], check=False)
+
+        logger.info("Opened session folder %s", folder)
+        if self._status_var is not None:
+            self._status_var.set(f"Opened sessions: {folder.name}")
+        if self._debug_var is not None:
+            self._debug_var.set(self._debug_details_text())
+        return folder
+
     def _window_state_path(self) -> Path:
         return Path.home() / ".autoangler" / "window.json"
 
@@ -700,8 +756,7 @@ class AutoFishTkApp:
         self._capture_mark_clip("mark-reel", now=now)
         logger.info("Manual reel mark")
         if self._is_fishing and self._is_line_out:
-            self._reel()
-            self._cast()
+            self._reel_and_recast()
             status = "Marked bite and reeled"
         else:
             status = "Marked reel"
@@ -736,6 +791,12 @@ class AutoFishTkApp:
         self._screenshot_index += 1
         self._last_saved_capture_name = filename.name
         return filename
+
+    def _close_session_recorder(self) -> None:
+        if self._session_recorder is None:
+            return
+        self._session_recorder.close()
+        self._session_recorder = None
 
     def _append_trace_row(self, *, now: float, event: str) -> Path:
         log_path = os.environ.get("AUTOANGLER_SESSION_LOG", "").strip()
@@ -777,6 +838,60 @@ class AutoFishTkApp:
 
         self._last_trace_name = trace_path.name
         return trace_path
+
+    def _append_profile_row(
+        self,
+        *,
+        now: float,
+        total_ms: float,
+        capture_ms: float,
+        detect_ms: float,
+        preview_ms: float,
+        record_ms: float,
+    ) -> Path:
+        log_path = os.environ.get("AUTOANGLER_SESSION_LOG", "").strip()
+        if log_path:
+            profile_path = build_session_profile_path(Path(log_path))
+        else:
+            profile_path = Path.home() / ".autoangler" / "profile.csv"
+
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not profile_path.exists() or profile_path.stat().st_size == 0
+        with profile_path.open("a", encoding="utf-8", newline="") as handle:
+            writer = DictWriter(
+                handle,
+                fieldnames=[
+                    "time_s",
+                    "is_fishing",
+                    "is_line_out",
+                    "total_ms",
+                    "capture_ms",
+                    "detect_ms",
+                    "preview_ms",
+                    "record_ms",
+                    "line_pixels",
+                    "trigger_pixels",
+                ],
+            )
+            if write_header:
+                writer.writeheader()
+            writer.writerow(
+                {
+                    "time_s": f"{now:.3f}",
+                    "is_fishing": int(self._is_fishing),
+                    "is_line_out": int(self._is_line_out),
+                    "total_ms": f"{total_ms:.1f}",
+                    "capture_ms": f"{capture_ms:.1f}",
+                    "detect_ms": f"{detect_ms:.1f}",
+                    "preview_ms": f"{preview_ms:.1f}",
+                    "record_ms": f"{record_ms:.1f}",
+                    "line_pixels": self._line_pixels,
+                    "trigger_pixels": self._line_watcher.trigger_pixels,
+                }
+            )
+
+        self._last_profile_name = profile_path.name
+        return profile_path
 
     def _maybe_save_debug_screenshot(
         self, label: str, *, image: np.ndarray | None = None
@@ -821,6 +936,7 @@ class AutoFishTkApp:
 
         last_error = self._last_capture_error or "-"
         last_capture = self._last_saved_capture_name or "-"
+        last_profile = self._last_profile_name or "-"
         last_trace = self._last_trace_name or "-"
         last_mark = self._last_mark_clip_name or "-"
         window_video = (
@@ -837,10 +953,41 @@ class AutoFishTkApp:
             f"recording:{'on' if self._recording_enabled else 'off'} "
             f"roi:{self._fishing_roi} track:{self._tracking_box} "
             f"detect:{self._detection_box} line_px:{self._line_pixels}\n"
+            f"perf:{self._profile_summary_text()}\n"
             f"{candidate_text}\n"
             f"videos:{window_video},{debug_video} last_mark:{last_mark}\n"
-            f"last_capture:{last_capture} last_trace:{last_trace} last_error:{last_error}"
+            f"last_capture:{last_capture} last_profile:{last_profile} "
+            f"last_trace:{last_trace} last_error:{last_error}"
         )
+
+    def _profile_summary_text(self) -> str:
+        rss_text = "-" if self._last_rss_mb is None else f"{self._last_rss_mb:.1f}MB"
+        top_stage = self._top_profile_stage_text()
+        return (
+            f"fps:{self._last_effective_fps:.1f} "
+            f"tick:{self._last_tick_duration_ms:.1f}ms "
+            f"cap:{self._last_capture_duration_ms:.1f}ms "
+            f"detect:{self._last_detect_duration_ms:.1f}ms "
+            f"preview:{self._last_preview_duration_ms:.1f}ms "
+            f"rec:{self._last_record_duration_ms:.1f}ms "
+            f"{top_stage} "
+            f"rss:{rss_text}"
+        )
+
+    def _top_profile_stage_text(self) -> str:
+        stage_name, duration_ms = max(
+            (
+                ("capture", self._last_capture_duration_ms),
+                ("detect", self._last_detect_duration_ms),
+                ("preview", self._last_preview_duration_ms),
+                ("record", self._last_record_duration_ms),
+            ),
+            key=lambda item: item[1],
+        )
+        pct = 0.0
+        if self._last_tick_duration_ms > 0:
+            pct = (duration_ms / self._last_tick_duration_ms) * 100
+        return f"top:{stage_name} {duration_ms:.1f}ms ({pct:.0f}%)"
 
     def _ensure_session_recorder(self) -> SessionRecorder | None:
         if self._session_recorder is not None:
@@ -852,6 +999,17 @@ class AutoFishTkApp:
 
         self._session_recorder = SessionRecorder(Path(log_path))
         return self._session_recorder
+
+    def _maybe_log_profile(self, *, now: float) -> None:
+        if not (self._is_fishing or self._recording_enabled):
+            return
+
+        interval_s = float(os.environ.get("AUTOANGLER_PROFILE_LOG_INTERVAL_S", "15"))
+        if self._last_profile_log_at and (now - self._last_profile_log_at) < interval_s:
+            return
+
+        self._last_profile_log_at = now
+        logger.info("PROFILE %s", self._profile_summary_text())
 
     def _capture_mark_clip(self, label: str, *, now: float) -> Path | None:
         if not self._recording_enabled:
@@ -914,6 +1072,15 @@ class AutoFishTkApp:
         if self._recording_enabled:
             self._append_trace_row(now=monotonic(), event="reel")
 
+    def _reel_and_recast(self) -> None:
+        self._reel()
+        if self._root is None:
+            self._cast()
+            return
+
+        recast_delay_ms = int(os.environ.get("AUTOANGLER_RECAST_DELAY_MS", "350"))
+        self._root.after(max(0, recast_delay_ms), self._cast)
+
     @staticmethod
     def _use_rod() -> None:
         pyautogui.rightClick()
@@ -933,17 +1100,37 @@ class AutoFishTkApp:
             return
 
         start_time = monotonic()
+        capture_duration_ms = 0.0
+        detect_duration_ms = 0.0
+        preview_duration_ms = 0.0
+        record_duration_ms = 0.0
 
         if self._should_capture_preview():
-            self._update_image()
+            (
+                capture_duration_ms,
+                detect_duration_ms,
+                preview_duration_ms,
+            ) = self._update_image_profiled()
             tick_now = monotonic()
+            record_start = monotonic()
             self._maybe_record_frame(now=tick_now)
+            record_duration_ms = round((monotonic() - record_start) * 1000, 1)
             if self._recording_enabled and self._is_fishing:
                 self._append_trace_row(now=tick_now, event="tick")
 
         if self._is_fish_on():
-            self._reel()
-            self._cast()
+            self._reel_and_recast()
+
+        duration_ms = round((monotonic() - start_time) * 1000, 1)
+        if self._should_capture_preview():
+            self._append_profile_row(
+                now=monotonic(),
+                total_ms=duration_ms,
+                capture_ms=capture_duration_ms,
+                detect_ms=detect_duration_ms,
+                preview_ms=preview_duration_ms,
+                record_ms=record_duration_ms,
+            )
 
         if self._is_fishing:
             now = time()
@@ -956,13 +1143,30 @@ class AutoFishTkApp:
                 self._tick_interval = (self._tick_interval + 1) % 23
                 self._current_clock = next_clock_position
 
-            duration_ms = round((monotonic() - start_time) * 1000, 1)
-
-            self._loop_index = (self._loop_index + 1) % self._loop_durations_ms.size
-            self._loop_durations_ms[self._loop_index] = duration_ms
+            self._profiler.add(
+                TickProfile(
+                    total_ms=duration_ms,
+                    capture_ms=capture_duration_ms,
+                    detect_ms=detect_duration_ms,
+                    preview_ms=preview_duration_ms,
+                    record_ms=record_duration_ms,
+                )
+            )
+            summary = self._profiler.summary()
+            self._last_tick_duration_ms = duration_ms
+            self._last_capture_duration_ms = capture_duration_ms
+            self._last_detect_duration_ms = detect_duration_ms
+            self._last_preview_duration_ms = preview_duration_ms
+            self._last_record_duration_ms = record_duration_ms
+            avg_ms = round(summary.avg_total_ms, 1)
+            avg_capture_ms = round(summary.avg_capture_ms, 1)
+            avg_detect_ms = round(summary.avg_detect_ms, 1)
+            avg_preview_ms = round(summary.avg_preview_ms, 1)
+            avg_record_ms = round(summary.avg_record_ms, 1)
+            self._last_effective_fps = round((1000.0 / avg_ms), 1) if avg_ms > 0 else 0.0
+            self._last_rss_mb = self._current_rss_mb()
 
             elapsed_s = int(now - self._start_clock)
-            avg_ms = round(float(np.average(self._loop_durations_ms)), 1)
             status = tracking_status_text(
                 line_pixels=self._cursor_image.black_pixel_count,
                 watcher=self._line_watcher,
@@ -977,6 +1181,21 @@ class AutoFishTkApp:
                 self._status_var.set(status)
             if self._debug_var is not None:
                 self._debug_var.set(self._debug_details_text())
+            logger.debug(
+                (
+                    "PROFILE_DETAIL avg_tick_ms=%.1f avg_capture_ms=%.1f "
+                    "avg_detect_ms=%.1f avg_preview_ms=%.1f "
+                    "avg_record_ms=%.1f fps=%.1f rss_mb=%s"
+                ),
+                avg_ms,
+                avg_capture_ms,
+                avg_detect_ms,
+                avg_preview_ms,
+                avg_record_ms,
+                self._last_effective_fps,
+                "-" if self._last_rss_mb is None else f"{self._last_rss_mb:.1f}",
+            )
+            self._maybe_log_profile(now=monotonic())
         elif self._debug_var is not None:
             self._debug_var.set(self._debug_details_text())
 
@@ -986,28 +1205,42 @@ class AutoFishTkApp:
             self._root.after(33, self._tick)
 
     def _update_image(self) -> None:
+        self._update_image_profiled()
+
+    def _update_image_profiled(self) -> tuple[float, float, float]:
+        capture_duration_ms = 0.0
+        detect_duration_ms = 0.0
+        preview_duration_ms = 0.0
+
         if self._viewer is None:
-            return
+            return capture_duration_ms, detect_duration_ms, preview_duration_ms
         if self._fishing_roi is None:
             self._latest_window_frame = None
             self._latest_debug_composite = None
             target = self._preview_target()
             if target is None:
-                return
+                return capture_duration_ms, detect_duration_ms, preview_duration_ms
             try:
+                capture_start = monotonic()
                 self._cursor_image = self._camera.capture(target)
+                capture_duration_ms = round((monotonic() - capture_start) * 1000, 1)
+                preview_start = monotonic()
                 self._viewer.update(self._cursor_image)
+                preview_duration_ms = round((monotonic() - preview_start) * 1000, 1)
             except Exception:
-                return
-            return
+                return capture_duration_ms, detect_duration_ms, preview_duration_ms
+            return capture_duration_ms, detect_duration_ms, preview_duration_ms
 
+        capture_start = monotonic()
         window_image = self._capture_window_image()
+        capture_duration_ms = round((monotonic() - capture_start) * 1000, 1)
         if window_image is None:
             self._latest_window_frame = None
             self._latest_debug_composite = None
-            return
+            return capture_duration_ms, detect_duration_ms, preview_duration_ms
 
         window_frame = window_image.original
+        detect_start = monotonic()
         roi_box, roi_frame = self._window_frame_and_roi(window_frame)
         self._line_candidate = self._line_detector.find_line(roi_frame)
         auto_calibrated = False
@@ -1024,12 +1257,18 @@ class AutoFishTkApp:
             self._line_pixels,
             active=self._is_fishing and self._is_line_out,
         )
+        detect_duration_ms = round((monotonic() - detect_start) * 1000, 1)
+
+        preview_start = monotonic()
         self._latest_window_frame = window_frame.copy()
         self._latest_debug_composite = self._build_debug_composite()
         if auto_calibrated and self._line_candidate is None:
             self._maybe_save_debug_screenshot("line-miss", image=self._cursor_image.original)
 
         self._viewer.update(self._cursor_image)
+        preview_duration_ms = round((monotonic() - preview_start) * 1000, 1)
+
+        return capture_duration_ms, detect_duration_ms, preview_duration_ms
 
     def _is_fish_on(self) -> bool:
         return self._is_fishing and self._is_line_out and self._bite_detected
@@ -1066,7 +1305,28 @@ class AutoFishTkApp:
         try:
             self._keyboard_listener.stop()
         finally:
-            if self._session_recorder is not None:
-                self._session_recorder.close()
+            self._close_session_recorder()
+            self._capture_backend.close()
             if self._root is not None:
                 self._root.destroy()
+
+    @staticmethod
+    def _rolling_average(values: np.ndarray) -> float:
+        non_zero = values[values > 0]
+        if non_zero.size == 0:
+            return 0.0
+        return float(np.average(non_zero))
+
+    @staticmethod
+    def _current_rss_mb() -> float | None:
+        if resource is None:
+            return None
+        try:
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+        except Exception:
+            return None
+
+        rss = float(usage.ru_maxrss)
+        if sys.platform == "darwin":
+            return rss / (1024 * 1024)
+        return rss / 1024

@@ -92,3 +92,55 @@ def test_run_experiment_appends_jsonld_results(tmp_path: Path) -> None:
     assert first_line["@type"] == "ExperimentRun"
     assert first_line["strategy"] == "absolute"
     assert first_line["trackingBox"] == [0, 0, 20, 20]
+
+
+def test_run_experiment_triggers_immediately_when_line_disappears(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    log_path = session_dir / "20260307-230000.log"
+    trace_path = session_dir / "20260307-230000-trace.csv"
+
+    frame_paths = [
+        session_dir / "20260307-230000-recording-00.png",
+        session_dir / "20260307-230000-recording-01.png",
+        session_dir / "20260307-230000-recording-02.png",
+    ]
+    _write_frame(frame_paths[0], 5)
+    _write_frame(frame_paths[1], 5)
+    _write_frame(frame_paths[2], 0)
+
+    log_path.write_text(
+        "\n".join(
+            [
+                f"2026-03-07 23:00:01 INFO autoangler.gui_tk: Saved screenshot to {frame_paths[0]}",
+                f"2026-03-07 23:00:02 INFO autoangler.gui_tk: Saved screenshot to {frame_paths[1]}",
+                "2026-03-07 23:00:02 INFO autoangler.gui_tk: Manual bite mark",
+                f"2026-03-07 23:00:03 INFO autoangler.gui_tk: Saved screenshot to {frame_paths[2]}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    trace_path.write_text(
+        "\n".join(
+            [
+                "time_s,event,is_fishing,is_line_out,line_pixels,trigger_pixels,weak_frames,bite_detected",
+                "1.0,mark,1,1,100,40,0,0",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_experiment(
+        session_log=log_path,
+        session_trace=trace_path,
+        tracking_box=(0, 0, 20, 20),
+        strategy="absolute",
+        threshold=32,
+        pre_frames=0,
+        post_frames=1,
+    )
+
+    assert result["hitCount"] == 1
+    assert result["detectionIndices"] == [2]

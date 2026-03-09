@@ -63,6 +63,31 @@ def test_append_trace_row_writes_csv(tmp_path: Path, monkeypatch) -> None:
     assert ",tick,1,1,50," in content
 
 
+def test_append_profile_row_writes_stage_timings(tmp_path: Path, monkeypatch) -> None:
+    app = AutoFishTkApp()
+    log_path = tmp_path / "sessions" / "s" / "s.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AUTOANGLER_SESSION_LOG", str(log_path))
+    app._is_fishing = True
+    app._is_line_out = True
+    app._line_pixels = 50
+    app._line_watcher.observe(200, active=True)
+    app._line_watcher.observe(50, active=True)
+
+    path = app._append_profile_row(
+        now=1.0,
+        total_ms=100.0,
+        capture_ms=70.0,
+        detect_ms=10.0,
+        preview_ms=15.0,
+        record_ms=5.0,
+    )
+
+    assert path == tmp_path / "sessions" / "s" / "s-profile.csv"
+    assert path.exists()
+    assert path.read_text().splitlines()[1].endswith(",100.0,70.0,10.0,15.0,5.0,50,80")
+
+
 def test_mark_bite_appends_mark_event(tmp_path: Path, monkeypatch) -> None:
     app = AutoFishTkApp()
     log_path = tmp_path / "sessions" / "20260307-213938.log"
@@ -90,6 +115,13 @@ def test_mark_reel_appends_mark_reel_event_and_recasts(
     app._is_line_out = True
     app._line_pixels = 77
     actions: list[str] = []
+    delayed_calls: list[tuple[int, object]] = []
+
+    class FakeRoot:
+        def after(self, delay_ms: int, callback) -> None:
+            delayed_calls.append((delay_ms, callback))
+
+    app._root = FakeRoot()
 
     mark_reel = getattr(app, "_mark_reel", None)
     assert mark_reel is not None
@@ -100,4 +132,24 @@ def test_mark_reel_appends_mark_reel_event_and_recasts(
 
     assert path == tmp_path / "sessions" / "20260307-213938-trace.csv"
     assert ",mark_reel,1,1,77," in path.read_text()
-    assert actions == ["reel", "cast"]
+    assert actions == ["reel"]
+    assert delayed_calls == [(350, app._cast)]
+
+
+def test_reel_and_recast_waits_before_cast(monkeypatch) -> None:
+    app = AutoFishTkApp()
+    actions: list[str] = []
+    delayed_calls: list[tuple[int, object]] = []
+
+    class FakeRoot:
+        def after(self, delay_ms: int, callback) -> None:
+            delayed_calls.append((delay_ms, callback))
+
+    app._root = FakeRoot()
+    monkeypatch.setattr(app, "_reel", lambda: actions.append("reel"))
+    monkeypatch.setattr(app, "_cast", lambda: actions.append("cast"))
+
+    app._reel_and_recast()
+
+    assert actions == ["reel"]
+    assert delayed_calls == [(350, app._cast)]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from pathlib import Path
 
 from pynput import keyboard
@@ -16,12 +17,15 @@ from autoangler.line_watcher import LineWatcher
 from autoangler.logging_utils import (
     build_session_capture_path,
     build_session_log_path,
+    build_session_profile_path,
 )
 
 
 def test_build_session_log_path_uses_timestamped_session_name(tmp_path: Path) -> None:
     path = build_session_log_path(tmp_path, "20260307-160455")
-    assert path == tmp_path / "sessions" / "20260307-160455.log"
+    assert path == (
+        tmp_path / "sessions" / "20260307-160455" / "20260307-160455.log"
+    )
 
 
 def test_build_session_log_path_uses_log_extension(tmp_path: Path) -> None:
@@ -29,12 +33,24 @@ def test_build_session_log_path_uses_log_extension(tmp_path: Path) -> None:
     assert path.suffix == ".log"
 
 
+def test_build_session_profile_path_uses_session_directory(tmp_path: Path) -> None:
+    log_path = tmp_path / "sessions" / "20260308-010000" / "20260308-010000.log"
+
+    path = build_session_profile_path(log_path)
+
+    assert path == (
+        tmp_path / "sessions" / "20260308-010000" / "20260308-010000-profile.csv"
+    )
+
+
 def test_build_session_capture_path_uses_session_log_stem(tmp_path: Path) -> None:
-    log_path = tmp_path / "sessions" / "20260307-211730.log"
+    log_path = tmp_path / "sessions" / "20260307-211730" / "20260307-211730.log"
 
     path = build_session_capture_path(log_path, "manual")
 
-    assert path == tmp_path / "sessions" / "20260307-211730-manual.png"
+    assert path == (
+        tmp_path / "sessions" / "20260307-211730" / "20260307-211730-manual.png"
+    )
 
 
 def test_logging_utils_exposes_video_and_mark_path_builders() -> None:
@@ -137,6 +153,45 @@ def test_toggle_recording_flips_recording_state() -> None:
     assert app._recording_enabled is False
 
 
+def test_toggle_recording_closes_session_recorder_when_disabling() -> None:
+    app = AutoFishTkApp()
+    app._recording_enabled = True
+    closed: list[str] = []
+
+    class FakeRecorder:
+        def close(self) -> None:
+            closed.append("closed")
+
+    app._session_recorder = FakeRecorder()  # type: ignore[assignment]
+
+    app._toggle_recording()
+
+    assert app._recording_enabled is False
+    assert closed == ["closed"]
+    assert app._session_recorder is None
+
+
+def test_open_session_folder_uses_active_session_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = AutoFishTkApp()
+    log_path = tmp_path / "sessions" / "20260307-211730.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("AUTOANGLER_SESSION_LOG", str(log_path))
+    monkeypatch.setattr("autoangler.gui_tk.sys.platform", "darwin")
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], check: bool) -> None:
+        calls.append(args)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    path = app._open_session_folder()
+
+    assert path == log_path.parent
+    assert calls == [["open", str(log_path.parent)]]
+
+
 def test_button_start_waits_five_seconds_before_tracking() -> None:
     app = AutoFishTkApp()
     calls: list[tuple[int, object]] = []
@@ -191,6 +246,79 @@ def test_hotkey_start_skips_five_second_delay() -> None:
 
     assert calls == ["cast"]
     assert app._button.text == "Stop Fishing"
+
+
+def test_tick_uses_delayed_recast_after_bite() -> None:
+    app = AutoFishTkApp()
+    calls: list[str] = []
+
+    class FakeRoot:
+        def after(self, _delay_ms: int, _callback) -> None:
+            return None
+
+    app._root = FakeRoot()
+    app._is_fish_on = lambda: True  # type: ignore[method-assign]
+    app._should_capture_preview = lambda: False  # type: ignore[method-assign]
+    app._reel_and_recast = lambda: calls.append("recast")  # type: ignore[method-assign]
+
+    app._tick()
+
+    assert calls == ["recast"]
+
+
+def test_debug_details_text_includes_profile_metrics() -> None:
+    app = AutoFishTkApp()
+    app._last_tick_duration_ms = 11.2
+    app._last_capture_duration_ms = 7.4
+    app._last_detect_duration_ms = 2.6
+    app._last_preview_duration_ms = 1.8
+    app._last_record_duration_ms = 1.1
+    app._last_effective_fps = 18.5
+    app._last_rss_mb = 64.0
+
+    text = app._debug_details_text()
+
+    assert "perf:" in text
+    assert "fps:18.5" in text
+    assert "tick:11.2ms" in text
+    assert "cap:7.4ms" in text
+    assert "detect:2.6ms" in text
+    assert "preview:1.8ms" in text
+    assert "rec:1.1ms" in text
+    assert "rss:64.0MB" in text
+
+
+def test_maybe_log_profile_emits_periodic_profile_line(monkeypatch) -> None:
+    app = AutoFishTkApp()
+    app._is_fishing = True
+    app._last_tick_duration_ms = 11.2
+    app._last_capture_duration_ms = 7.4
+    app._last_record_duration_ms = 1.1
+    app._last_effective_fps = 18.5
+    app._last_rss_mb = 64.0
+    messages: list[str] = []
+
+    monkeypatch.setattr(
+        "autoangler.gui_tk.logger.info",
+        lambda message, *args: messages.append(message % args if args else message),
+    )
+
+    app._maybe_log_profile(now=20.0)
+
+    assert any(message.startswith("PROFILE ") for message in messages)
+
+
+def test_debug_details_text_reports_top_stage() -> None:
+    app = AutoFishTkApp()
+    app._last_tick_duration_ms = 100.0
+    app._last_capture_duration_ms = 70.0
+    app._last_detect_duration_ms = 10.0
+    app._last_preview_duration_ms = 5.0
+    app._last_record_duration_ms = 4.0
+
+    text = app._debug_details_text()
+
+    assert "top:capture" in text
 
 
 def test_debug_details_text_includes_recording_and_candidate_details() -> None:

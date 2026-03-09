@@ -4,10 +4,10 @@ from autoangler.minecraft_window import WindowInfo
 
 
 def default_fishing_roi(window: WindowInfo) -> tuple[int, int, int, int]:
-    left = window.left + int(window.width * 0.25)
-    top = window.top + int(window.height * (1 / 6))
-    right = window.left + int(window.width * 0.75)
-    bottom = window.top + int(window.height * (2 / 3))
+    left = window.left + int(window.width * 0.40)
+    top = window.top + int(window.height * 0.25)
+    right = window.left + int(window.width * 0.80)
+    bottom = window.top + int(window.height * 0.75)
     return left, top, right, bottom
 
 

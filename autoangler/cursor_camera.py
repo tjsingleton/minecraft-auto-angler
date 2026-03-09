@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
-from PIL import ImageGrab
 
+from autoangler.capture_backend import CaptureBackend, create_capture_backend
 from autoangler.cursor_image import CursorImage
 from autoangler.screen import get_virtual_screen_bounds
 
@@ -13,8 +13,13 @@ class CursorCamera:
     Takes an image of directly below the position of the cursor.
     """
 
-    def __init__(self, magnification: int = 1) -> None:
+    def __init__(
+        self,
+        magnification: int = 1,
+        capture_backend: CaptureBackend | None = None,
+    ) -> None:
         self._magnification = magnification
+        self._capture_backend = capture_backend or create_capture_backend()
 
     def capture(self, cursor_position: tuple[int, int] | tuple[float, float]) -> CursorImage:
         """
@@ -34,7 +39,7 @@ class CursorCamera:
                 raise OSError(f"Capture bbox {bbox} does not intersect any displays.")
             bbox = clamped
 
-        capture = ImageGrab.grab(bbox=bbox)
+        capture = self._capture_backend.grab(bbox)
         original = self.post_process(capture, magnify=magnify)
 
         computer = np.clip(original, 0, 1) * 255
@@ -49,7 +54,8 @@ class CursorCamera:
         Convert to grayscale and enlarge.
         """
         processed = np.array(image)
-        processed = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+        if processed.ndim == 3:
+            processed = cv2.cvtColor(processed, cv2.COLOR_RGB2GRAY)
         if magnify:
             processed = cv2.resize(
                 processed,
@@ -77,3 +83,6 @@ class CursorCamera:
         length = self._magnification * 30
         empty_image = np.full((length, length), 255, dtype=np.uint8)
         return CursorImage(original=empty_image, computer=empty_image, black_pixel_count=0)
+
+    def close(self) -> None:
+        self._capture_backend.close()

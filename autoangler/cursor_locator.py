@@ -6,17 +6,18 @@ from importlib import resources
 
 import cv2
 import numpy as np
-from PIL import ImageGrab
 
+from autoangler.capture_backend import CaptureBackend, create_capture_backend
 from autoangler.screen import get_virtual_screen_bounds
 
 logger = logging.getLogger(__name__)
 
 
 class CursorLocator:
-    def __init__(self) -> None:
+    def __init__(self, capture_backend: CaptureBackend | None = None) -> None:
         threshold_env = os.environ.get("AUTOANGLER_CURSOR_THRESHOLD", "").strip()
         self._threshold = float(threshold_env) if threshold_env else 0.8
+        self._capture_backend = capture_backend or create_capture_backend()
 
         scales_env = os.environ.get("AUTOANGLER_CURSOR_SCALES", "").strip()
         if scales_env:
@@ -51,9 +52,8 @@ class CursorLocator:
         self.last_best_loc: tuple[int, int] | None = None
 
     def locate(self) -> tuple[int, int] | None:
-        img = ImageGrab.grab()
-        arr = np.array(img)  # convert the image to numpy array
-        image = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        arr = self._capture_backend.grab()
+        image = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
 
         best_val = None
         best_loc = None
@@ -103,3 +103,6 @@ class CursorLocator:
             return None
 
         return center
+
+    def close(self) -> None:
+        self._capture_backend.close()

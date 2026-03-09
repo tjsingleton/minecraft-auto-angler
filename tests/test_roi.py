@@ -9,10 +9,10 @@ from autoangler.roi import (
 )
 
 
-def test_default_fishing_roi_uses_upper_middle_of_window() -> None:
+def test_default_fishing_roi_uses_smaller_lower_right_window_region() -> None:
     window = WindowInfo(title="Minecraft", left=100, top=100, width=1600, height=900)
     roi = default_fishing_roi(window)
-    assert roi == (500, 250, 1300, 700)
+    assert roi == (740, 325, 1380, 775)
 
 
 def test_clamp_roi_to_window_bounds() -> None:
@@ -24,15 +24,15 @@ def test_clamp_roi_to_window_bounds() -> None:
 def test_window_relative_box_uses_window_origin() -> None:
     window = WindowInfo(title="Minecraft", left=18, top=30, width=1280, height=705)
 
-    box = window_relative_box((338, 147, 978, 500), window)
+    box = window_relative_box((530, 206, 1042, 558), window)
 
-    assert box == (320, 117, 960, 470)
+    assert box == (512, 176, 1024, 528)
 
 
 def test_cursor_anchor_in_roi_tracks_window_center_with_offset() -> None:
     window = WindowInfo(title="Minecraft", left=18, top=30, width=1280, height=705)
-    roi = (338, 147, 978, 500)
+    roi = (530, 206, 1042, 558)
 
     anchor = cursor_anchor_in_roi(window, roi, y_offset=15)
 
-    assert anchor == (320, 250)
+    assert anchor == (128, 191)

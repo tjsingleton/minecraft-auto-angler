@@ -12,12 +12,14 @@ import numpy as np
 
 from autoangler.line_detector import absolute_dark_mask, local_contrast_mask
 from autoangler.line_watcher import LineWatcher
+from autoangler.profile_session import summarize_profile
 
 EXPERIMENT_CONTEXT = {
     "@vocab": "https://autoangler.local/experiment#",
     "sessionLog": {"@type": "@id"},
     "sessionTrace": {"@type": "@id"},
     "experimentLog": {"@type": "@id"},
+    "sessionProfile": {"@type": "@id"},
 }
 
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -26,6 +28,7 @@ LOG_PREFIX_PATTERN = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) "
     r"(?P<level>[A-Z]+) (?P<logger>[^:]+): (?P<message>.*)$"
 )
+WINDOW_TITLE_PATTERN = re.compile(r"Using Minecraft window '(?P<title>.+?)' at WindowInfo")
 
 
 @dataclass(frozen=True)
@@ -217,8 +220,64 @@ def append_experiment_log(log_path: Path, entry: dict[str, object]) -> Path:
     return log_path
 
 
+def run_capture_benchmark(
+    *,
+    session_log: Path,
+    session_profile: Path,
+    backend_name: str,
+    session_trace: Path | None = None,
+    experiment_log: Path | None = None,
+) -> dict[str, object]:
+    session_log = session_log.resolve()
+    session_profile = session_profile.resolve()
+    profile_summary = summarize_profile(session_profile)
+    window_title = parse_window_title(session_log)
+
+    result: dict[str, object] = {
+        "@context": EXPERIMENT_CONTEXT,
+        "@type": "CaptureBackendRun",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "backend": backend_name,
+        "sessionLog": session_log.as_uri(),
+        "sessionProfile": session_profile.as_uri(),
+        "sessionTrace": session_trace.resolve().as_uri() if session_trace is not None else None,
+        "windowTitle": window_title,
+        "avgFps": profile_summary["avg_fps"],
+        "avgTotalMs": profile_summary["avg_total_ms"],
+        "avgCaptureMs": profile_summary["avg_capture_ms"],
+        "avgDetectMs": profile_summary["avg_detect_ms"],
+        "avgPreviewMs": profile_summary["avg_preview_ms"],
+        "avgRecordMs": profile_summary["avg_record_ms"],
+        "capturePct": profile_summary["capture_pct"],
+        "detectPct": profile_summary["detect_pct"],
+        "previewPct": profile_summary["preview_pct"],
+        "recordPct": profile_summary["record_pct"],
+        "topStage": profile_summary["top_stage"],
+        "profileSummary": profile_summary,
+    }
+
+    log_path = experiment_log or default_experiment_log_path()
+    append_experiment_log(log_path, result)
+    result["experimentLog"] = log_path.resolve().as_uri()
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.profile:
+        result = run_capture_benchmark(
+            session_log=Path(args.session_log).expanduser(),
+            session_profile=Path(args.profile).expanduser(),
+            backend_name=args.backend,
+            session_trace=Path(args.trace).expanduser() if args.trace else None,
+            experiment_log=Path(args.experiment_log).expanduser() if args.experiment_log else None,
+        )
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.box is None:
+        raise SystemExit("--box is required unless --profile is provided")
+
     threshold = args.threshold
     if threshold is None:
         threshold = 12 if args.strategy == "local-contrast" else 32
@@ -242,7 +301,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("session_log", help="Path to the AutoAngler session log")
     parser.add_argument("--trace", help="Optional path to the matching session trace CSV")
-    parser.add_argument("--box", required=True, type=parse_box, help="Tracking box x1,y1,x2,y2")
+    parser.add_argument("--box", type=parse_box, help="Tracking box x1,y1,x2,y2")
+    parser.add_argument("--profile", help="Path to a matching <session>-profile.csv")
+    parser.add_argument(
+        "--backend",
+        choices=("mss", "pil"),
+        default="mss",
+        help="Capture backend name for benchmark logging",
+    )
     parser.add_argument(
         "--strategy",
         choices=("local-contrast", "absolute"),
@@ -258,6 +324,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--post-frames", type=int, default=4)
     parser.add_argument("--experiment-log", help="Append-only JSON-LD log path")
     return parser
+
+
+def parse_window_title(log_path: Path) -> str | None:
+    for raw_line in log_path.read_text(encoding="utf-8").splitlines():
+        match = LOG_PREFIX_PATTERN.match(raw_line)
+        if match is None:
+            continue
+        title_match = WINDOW_TITLE_PATTERN.search(match.group("message"))
+        if title_match is not None:
+            return title_match.group("title")
+    return None
 
 
 def _score_frames(

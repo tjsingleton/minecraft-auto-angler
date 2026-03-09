@@ -6,8 +6,13 @@ from pathlib import Path
 from time import strftime
 
 
+def build_session_dir(log_dir: Path, session_name: str) -> Path:
+    return log_dir / "sessions" / session_name
+
+
 def build_session_log_path(log_dir: Path, session_name: str) -> Path:
-    return log_dir / "sessions" / f"{session_name}.log"
+    session_dir = build_session_dir(log_dir, session_name)
+    return session_dir / f"{session_name}.log"
 
 
 def build_session_capture_path(log_path: Path, label: str) -> Path:
@@ -24,6 +29,10 @@ def build_session_mark_dir(log_path: Path, label: str, index: int) -> Path:
 
 def build_session_trace_path(log_path: Path) -> Path:
     return log_path.with_name(f"{log_path.stem}-trace.csv")
+
+
+def build_session_profile_path(log_path: Path) -> Path:
+    return log_path.with_name(f"{log_path.stem}-profile.csv")
 
 
 def configure_logging() -> Path | None:

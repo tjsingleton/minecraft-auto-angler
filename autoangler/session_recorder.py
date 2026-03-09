@@ -101,6 +101,10 @@ class SessionRecorder:
         self.finish_clips()
         self._release_writer("_window_writer")
         self._release_writer("_debug_writer")
+        self._buffer.clear()
+        self._pending.clear()
+        self._window_size = None
+        self._debug_size = None
 
     def _write_window_frame(self, frame: np.ndarray) -> None:
         writer = self._ensure_writer(
