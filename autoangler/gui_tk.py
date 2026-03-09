@@ -240,6 +240,7 @@ class AutoFishTkApp:
         self._next_vision_seq = 0
         self._last_applied_vision_seq = 0
         self._last_vision_completed_at: float | None = None
+        self._last_vision_submit_at = 0.0
 
     def run(self) -> None:
         import tkinter as tk
@@ -442,6 +443,18 @@ class AutoFishTkApp:
         self._last_applied_vision_seq = 0
         self._last_vision_completed_at = None
         self._last_vision_age_ms = 0.0
+        self._last_vision_submit_at = 0.0
+
+    @staticmethod
+    def _max_capture_interval_s() -> float:
+        raw_value = os.environ.get("AUTOANGLER_MAX_CAPTURE_FPS", "10").strip()
+        try:
+            fps = float(raw_value)
+        except ValueError:
+            fps = 10.0
+        if fps <= 0:
+            fps = 10.0
+        return 1.0 / fps
 
     def _ensure_vision_worker(self) -> VisionWorker:
         if self._vision_worker is None:
@@ -1636,6 +1649,10 @@ class AutoFishTkApp:
             self._refresh_tracking_context()
 
     def _submit_vision_request(self, *, now: float) -> None:
+        min_interval_s = self._max_capture_interval_s()
+        if self._last_vision_submit_at and (now - self._last_vision_submit_at) < min_interval_s:
+            return
+        self._last_vision_submit_at = now
         self._next_vision_seq += 1
         request = VisionRequest(
             epoch=self._vision_epoch,

@@ -358,6 +358,27 @@ def test_tick_uses_delayed_recast_after_bite() -> None:
     assert calls == ["recast"]
 
 
+def test_submit_vision_request_respects_env_capture_fps_cap(monkeypatch) -> None:
+    app = AutoFishTkApp()
+    monkeypatch.setenv("AUTOANGLER_MAX_CAPTURE_FPS", "2")
+    submitted: list[int] = []
+
+    class FakeWorker:
+        dropped_frames = 0
+
+        def submit(self, request) -> None:
+            submitted.append(request.seq)
+
+    app._vision_worker = FakeWorker()  # type: ignore[assignment]
+    app._vision_epoch = 1
+
+    app._submit_vision_request(now=1.0)
+    app._submit_vision_request(now=1.2)
+    app._submit_vision_request(now=1.6)
+
+    assert submitted == [1, 2]
+
+
 def test_debug_details_text_includes_profile_metrics() -> None:
     app = AutoFishTkApp()
     app._last_tick_duration_ms = 11.2

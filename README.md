@@ -147,6 +147,9 @@ correlate missed bites against the captured frames. For denser PNG capture durin
 To summarize a session profile and its trigger sequence, run
 `uv run python -m autoangler.profile_session /path/to/session-profile.csv`.
 
+To cap how often AutoAngler submits new screen-capture work, set
+`AUTOANGLER_MAX_CAPTURE_FPS` before launch. The default cap is `10`.
+
 To capture a sampling-profiler flame graph for a live run, use
 `./scripts/profile_flamegraph.sh /path/to/output-flame.svg`.
 If you omit the path, it writes to `~/.autoangler/flamegraph.svg`.
