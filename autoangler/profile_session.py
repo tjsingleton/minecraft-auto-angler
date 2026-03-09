@@ -28,10 +28,14 @@ def summarize_profile(profile_csv: Path) -> dict[str, float | str]:
             "avg_detect_ms": 0.0,
             "avg_preview_ms": 0.0,
             "avg_record_ms": 0.0,
+            "avg_vision_age_ms": 0.0,
+            "avg_record_queue_depth": 0.0,
             "capture_pct": 0.0,
             "detect_pct": 0.0,
             "preview_pct": 0.0,
             "record_pct": 0.0,
+            "max_vision_dropped_frames": 0,
+            "max_record_dropped_frames": 0,
             "top_stage": "capture",
         }
 
@@ -49,10 +53,14 @@ def summarize_profile(profile_csv: Path) -> dict[str, float | str]:
         "avg_detect_ms": round(averages["detect"], 1),
         "avg_preview_ms": round(averages["preview"], 1),
         "avg_record_ms": round(averages["record"], 1),
+        "avg_vision_age_ms": round(_average_optional(rows, "vision_age_ms"), 1),
+        "avg_record_queue_depth": round(_average_optional(rows, "record_queue_depth"), 1),
         "capture_pct": _pct(averages["capture"], avg_total_ms),
         "detect_pct": _pct(averages["detect"], avg_total_ms),
         "preview_pct": _pct(averages["preview"], avg_total_ms),
         "record_pct": _pct(averages["record"], avg_total_ms),
+        "max_vision_dropped_frames": int(_max_optional(rows, "vision_dropped_frames")),
+        "max_record_dropped_frames": int(_max_optional(rows, "record_dropped_frames")),
         "top_stage": top_stage,
     }
 
@@ -121,6 +129,20 @@ def _parse_float(value: str | None) -> float | None:
     if value is None or value == "":
         return None
     return float(value)
+
+
+def _average_optional(rows: list[dict[str, str]], field: str) -> float:
+    values = [float(row[field]) for row in rows if row.get(field, "") not in {"", None}]
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _max_optional(rows: list[dict[str, str]], field: str) -> float:
+    values = [float(row[field]) for row in rows if row.get(field, "") not in {"", None}]
+    if not values:
+        return 0.0
+    return max(values)
 
 
 def main(argv: list[str] | None = None) -> int:

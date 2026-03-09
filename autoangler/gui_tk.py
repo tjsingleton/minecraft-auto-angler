@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 from csv import DictWriter
+from functools import partial
 from importlib import resources
 from pathlib import Path
 from time import monotonic, sleep, time
@@ -23,16 +24,19 @@ try:
 except ImportError:  # pragma: no cover - Windows
     resource = None  # type: ignore[assignment]
 
+from autoangler.async_pipeline import (
+    RecordingEvent,
+    RecordingWorker,
+    VisionRequest,
+    VisionResult,
+    VisionWorker,
+)
 from autoangler.audio_probe import AudioHintEvent, AudioHintMonitor
 from autoangler.capture_backend import create_capture_backend
 from autoangler.cursor_camera import CursorCamera
 from autoangler.cursor_image import CursorImage
 from autoangler.cursor_locator import CursorLocator
-from autoangler.line_detector import (
-    FishingLineDetector,
-    LineCandidate,
-    centered_tracking_box,
-)
+from autoangler.line_detector import FishingLineDetector, LineCandidate, centered_tracking_box
 from autoangler.line_watcher import LineWatcher
 from autoangler.logging_utils import (
     build_session_capture_path,
@@ -50,7 +54,6 @@ from autoangler.roi import (
 )
 from autoangler.runtime_config import DelayRange, RuntimeConfig
 from autoangler.screen import get_virtual_screen_bounds
-from autoangler.session_recorder import SessionRecorder
 
 # The default pause sometimes causes the cast to also retrieve
 pyautogui.PAUSE = 0.01
@@ -165,6 +168,10 @@ class AutoFishTkApp:
         self._last_profile_log_at = 0.0
         self._last_context_refresh_at = 0.0
         self._last_bite_indicator_at = 0.0
+        self._last_vision_age_ms = 0.0
+        self._vision_dropped_frames = 0
+        self._record_queue_depth = 0
+        self._record_dropped_frames = 0
 
         self._viewer: Any | None = None
         self._debug_viewer: Any | None = None
@@ -222,12 +229,17 @@ class AutoFishTkApp:
         self._last_profile_name: str | None = None
         self._last_trace_name: str | None = None
         self._last_mark_clip_name: str | None = None
-        self._session_recorder: SessionRecorder | None = None
         self._latest_window_frame: np.ndarray | None = None
         self._latest_debug_composite: np.ndarray | None = None
         self._audio_monitor = audio_monitor
         self._audio_monitor_started = False
         self._last_audio_hint: AudioHintEvent | None = None
+        self._vision_worker: VisionWorker | None = None
+        self._recording_worker: RecordingWorker | None = None
+        self._vision_epoch = 0
+        self._next_vision_seq = 0
+        self._last_applied_vision_seq = 0
+        self._last_vision_completed_at: float | None = None
 
     def run(self) -> None:
         import tkinter as tk
@@ -425,15 +437,65 @@ class AutoFishTkApp:
         except Exception:
             return False
 
+    def _invalidate_vision_epoch(self) -> None:
+        self._vision_epoch += 1
+        self._last_applied_vision_seq = 0
+        self._last_vision_completed_at = None
+        self._last_vision_age_ms = 0.0
+
+    def _ensure_vision_worker(self) -> VisionWorker:
+        if self._vision_worker is None:
+            self._vision_worker = VisionWorker()
+        return self._vision_worker
+
+    def _ensure_recording_worker(self) -> RecordingWorker:
+        if self._recording_worker is None:
+            log_path = os.environ.get("AUTOANGLER_SESSION_LOG", "").strip()
+            self._recording_worker = RecordingWorker(
+                log_path=Path(log_path) if log_path else None,
+            )
+        return self._recording_worker
+
+    def _close_recording_worker(self) -> None:
+        if self._recording_worker is None:
+            return
+        self._recording_worker.close()
+        for event in self._recording_worker.poll_events():
+            self._handle_recording_event(event)
+        self._recording_worker = None
+        self._record_queue_depth = 0
+
+    def _close_vision_worker(self) -> None:
+        if self._vision_worker is None:
+            return
+        self._vision_worker.close()
+        self._vision_worker = None
+
+    def _drain_recording_events(self) -> None:
+        worker = self._recording_worker
+        if worker is None:
+            return
+        self._record_queue_depth = worker.queue_depth
+        self._record_dropped_frames = worker.dropped_frames
+        for event in worker.poll_events():
+            self._handle_recording_event(event)
+
+    def _handle_recording_event(self, event: RecordingEvent) -> None:
+        if event.kind == "screenshot_saved" and event.path is not None:
+            self._last_saved_capture_name = event.path.name
+        elif event.kind == "mark_saved" and event.path is not None:
+            self._last_mark_clip_name = event.path.name
+        self._record_queue_depth = event.queue_depth
+
     def _toggle_fishing(self) -> None:
         if self._is_fishing:
-            self._stop()
+            self._stop(source="button")
         else:
             self._start()
 
     def _toggle_fishing_hotkey(self) -> None:
         if self._is_fishing:
-            self._stop()
+            self._stop(source="hotkey_f12")
         else:
             self._start_hotkey()
 
@@ -483,7 +545,7 @@ class AutoFishTkApp:
             self._last_recording_capture_at = 0.0
             logger.info("Recording enabled")
         else:
-            self._close_session_recorder()
+            self._close_recording_worker()
             logger.info("Recording disabled")
 
         if self._record_button is not None:
@@ -522,6 +584,7 @@ class AutoFishTkApp:
         self._cast_count = 0
         self._last_bite_indicator_at = 0.0
         self._line_watcher.reset()
+        self._invalidate_vision_epoch()
 
         if self._button is not None:
             self._button.configure(text="Stop Fishing")
@@ -536,7 +599,7 @@ class AutoFishTkApp:
         else:
             self._cast_and_begin_tracking()
 
-    def _stop(self) -> None:
+    def _stop(self, *, source: str = "system") -> None:
         if self._root is None and self._button is None:
             return
 
@@ -546,6 +609,7 @@ class AutoFishTkApp:
         self._start_clock = None
         self._bite_detected = False
         self._line_watcher.reset()
+        self._invalidate_vision_epoch()
 
         if not self._exiting:
             if self._button is not None:
@@ -554,9 +618,8 @@ class AutoFishTkApp:
                 self._status_var.set("Stopped")
         self._sync_line_state_indicator()
         if self._recording_enabled:
-            self._append_trace_row(now=monotonic(), event="stop")
-        if self._session_recorder is not None:
-            self._session_recorder.finish_clips()
+            self._append_trace_row(now=monotonic(), event="stop", source=source)
+        self._close_recording_worker()
 
     def _cast_and_begin_tracking(self) -> None:
         if not self._is_fishing:
@@ -588,6 +651,7 @@ class AutoFishTkApp:
         self._line_pixels = 0
         self._bite_detected = False
         self._line_watcher.reset()
+        self._invalidate_vision_epoch()
         logger.info("Using Minecraft window '%s' at %s", window.title, window)
         logger.info("Fishing ROI set to %s", self._fishing_roi)
         if self._status_var is not None:
@@ -1070,36 +1134,26 @@ class AutoFishTkApp:
         return path
 
     def _save_screenshot(self, label: str, *, image: np.ndarray | None = None) -> Path:
-        from PIL import Image
-
         if image is None:
             image = self._cursor_image.original
-
-        log_path = os.environ.get("AUTOANGLER_SESSION_LOG", "").strip()
-        if log_path:
-            filename = build_session_capture_path(
-                Path(log_path),
-                f"{label}-{self._screenshot_index:02d}",
-            )
-        else:
-            filename = (
-                Path.home()
-                / ".autoangler"
-                / f"{label}-{self._screenshot_index:02d}.png"
-            )
-
-        filename.parent.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(image.astype("uint8"), mode="L").save(filename)
-        logger.info("Saved screenshot to %s", filename)
-        self._screenshot_index += 1
+        filename = self._next_screenshot_path(label)
+        self._ensure_recording_worker().enqueue_screenshot(path=filename, image=image)
         self._last_saved_capture_name = filename.name
+        logger.info("Queued screenshot to %s", filename)
+        self._screenshot_index += 1
         return filename
 
     def _close_session_recorder(self) -> None:
-        if self._session_recorder is None:
-            return
-        self._session_recorder.close()
-        self._session_recorder = None
+        self._close_recording_worker()
+
+    def _next_screenshot_path(self, label: str) -> Path:
+        log_path = os.environ.get("AUTOANGLER_SESSION_LOG", "").strip()
+        if log_path:
+            return build_session_capture_path(
+                Path(log_path),
+                f"{label}-{self._screenshot_index:02d}",
+            )
+        return Path.home() / ".autoangler" / f"{label}-{self._screenshot_index:02d}.png"
 
     def _append_trace_row(
         self,
@@ -1189,6 +1243,34 @@ class AutoFishTkApp:
             )
 
         self._last_trace_name = trace_path.name
+        event_parts = [
+            f"source={source}",
+            f"is_fishing={int(self._is_fishing)}",
+            f"is_line_out={int(self._is_line_out)}",
+            f"line_pixels={self._line_pixels}",
+            f"trigger_pixels={self._line_watcher.trigger_pixels}",
+            f"weak_frames={self._line_watcher.weak_frames}",
+            f"bite_detected={int(self._bite_detected)}",
+            f"rod_in_hand={int(self._rod_in_hand)}",
+            f"catch_count={self._catch_count}",
+        ]
+        if scheduled_delay_ms is not None:
+            event_parts.append(f"scheduled_delay_ms={scheduled_delay_ms}")
+        if audio_hint_rms is not None:
+            event_parts.append(f"audio_hint_rms={audio_hint_rms:.4f}")
+        if audio_hint_peak is not None:
+            event_parts.append(f"audio_hint_peak={audio_hint_peak:.4f}")
+        if strafe_direction:
+            event_parts.append(f"strafe_direction={strafe_direction}")
+        if strafe_duration_ms is not None:
+            event_parts.append(f"strafe_duration_ms={strafe_duration_ms}")
+        if training_label:
+            event_parts.append(f"training_label={training_label}")
+        event_message = "EVENT %s %s"
+        if event == "tick":
+            logger.debug(event_message, event, " ".join(event_parts))
+        else:
+            logger.info(event_message, event, " ".join(event_parts))
         return trace_path
 
     def _append_profile_row(
@@ -1228,6 +1310,10 @@ class AutoFishTkApp:
                     "detect_ms",
                     "preview_ms",
                     "record_ms",
+                    "vision_age_ms",
+                    "vision_dropped_frames",
+                    "record_queue_depth",
+                    "record_dropped_frames",
                     "line_pixels",
                     "trigger_pixels",
                 ],
@@ -1250,6 +1336,10 @@ class AutoFishTkApp:
                     "detect_ms": f"{detect_ms:.1f}",
                     "preview_ms": f"{preview_ms:.1f}",
                     "record_ms": f"{record_ms:.1f}",
+                    "vision_age_ms": f"{self._last_vision_age_ms:.1f}",
+                    "vision_dropped_frames": self._vision_dropped_frames,
+                    "record_queue_depth": self._record_queue_depth,
+                    "record_dropped_frames": self._record_dropped_frames,
                     "line_pixels": self._line_pixels,
                     "trigger_pixels": self._line_watcher.trigger_pixels,
                 }
@@ -1269,13 +1359,11 @@ class AutoFishTkApp:
         if not self._recording_enabled or not self._is_fishing:
             return None
 
-        recorder = self._ensure_session_recorder()
         if (
-            recorder is not None
-            and self._latest_window_frame is not None
+            self._latest_window_frame is not None
             and self._latest_debug_composite is not None
         ):
-            recorder.record_frame(
+            self._ensure_recording_worker().enqueue_frame(
                 now=now,
                 raw_window_frame=self._latest_window_frame,
                 debug_frame=self._latest_debug_composite,
@@ -1305,13 +1393,13 @@ class AutoFishTkApp:
         last_trace = self._last_trace_name or "-"
         last_mark = self._last_mark_clip_name or "-"
         window_video = (
-            self._session_recorder.window_video_path.name
-            if self._session_recorder is not None
+            self._recording_worker.window_video_path.name
+            if self._recording_worker is not None and self._recording_worker.window_video_path
             else "-"
         )
         debug_video = (
-            self._session_recorder.debug_video_path.name
-            if self._session_recorder is not None
+            self._recording_worker.debug_video_path.name
+            if self._recording_worker is not None and self._recording_worker.debug_video_path
             else "-"
         )
         return (
@@ -1358,6 +1446,10 @@ class AutoFishTkApp:
             f"preview:{self._last_preview_duration_ms:.1f}ms "
             f"rec:{self._last_record_duration_ms:.1f}ms "
             f"{top_stage} "
+            f"vage:{self._last_vision_age_ms:.1f}ms "
+            f"vdrop:{self._vision_dropped_frames} "
+            f"rqueue:{self._record_queue_depth} "
+            f"rdrop:{self._record_dropped_frames} "
             f"rss:{rss_text}"
         )
 
@@ -1376,17 +1468,6 @@ class AutoFishTkApp:
             pct = (duration_ms / self._last_tick_duration_ms) * 100
         return f"top:{stage_name} {duration_ms:.1f}ms ({pct:.0f}%)"
 
-    def _ensure_session_recorder(self) -> SessionRecorder | None:
-        if self._session_recorder is not None:
-            return self._session_recorder
-
-        log_path = os.environ.get("AUTOANGLER_SESSION_LOG", "").strip()
-        if not log_path:
-            return None
-
-        self._session_recorder = SessionRecorder(Path(log_path))
-        return self._session_recorder
-
     def _maybe_log_profile(self, *, now: float) -> None:
         if not (self._is_fishing or self._recording_enabled):
             return
@@ -1401,14 +1482,8 @@ class AutoFishTkApp:
     def _capture_mark_clip(self, label: str, *, now: float) -> Path | None:
         if not self._recording_enabled:
             return None
-
-        recorder = self._ensure_session_recorder()
-        if recorder is None:
-            return None
-
-        clip_path = recorder.mark(label, now=now)
-        self._last_mark_clip_name = clip_path.name
-        return clip_path
+        self._ensure_recording_worker().enqueue_mark(label=label, now=now)
+        return None
 
     def _set_rod_in_hand(self, value: bool) -> None:
         if value == self._rod_in_hand:
@@ -1560,23 +1635,109 @@ class AutoFishTkApp:
         ):
             self._refresh_tracking_context()
 
+    def _submit_vision_request(self, *, now: float) -> None:
+        self._next_vision_seq += 1
+        request = VisionRequest(
+            epoch=self._vision_epoch,
+            seq=self._next_vision_seq,
+            submitted_at=now,
+            minecraft_window=self._minecraft_window,
+            fishing_roi=self._fishing_roi,
+            tracking_box=self._tracking_box,
+            detection_box=self._detection_box,
+            is_fishing=self._is_fishing,
+            is_line_out=self._is_line_out,
+        )
+        worker = self._ensure_vision_worker()
+        worker.submit(request)
+        self._vision_dropped_frames = worker.dropped_frames
+
+    def _drain_vision_results(self) -> None:
+        worker = self._vision_worker
+        if worker is None:
+            return
+        for result in worker.poll_results():
+            self._apply_vision_result(result)
+        self._vision_dropped_frames = worker.dropped_frames
+        if self._last_vision_completed_at is not None:
+            self._last_vision_age_ms = round(
+                (monotonic() - self._last_vision_completed_at) * 1000,
+                1,
+            )
+
+    def _apply_vision_result(self, result: VisionResult) -> bool:
+        if result.epoch != self._vision_epoch:
+            return False
+        if result.seq <= self._last_applied_vision_seq:
+            return False
+
+        self._last_applied_vision_seq = result.seq
+        self._last_vision_completed_at = result.completed_at
+        self._last_vision_age_ms = round((monotonic() - result.completed_at) * 1000, 1)
+        self._last_capture_duration_ms = result.capture_ms
+        self._last_detect_duration_ms = result.detect_ms
+
+        if result.capture_error is not None:
+            self._consecutive_capture_failures += 1
+            self._last_capture_error = result.capture_error
+            if self._consecutive_capture_failures >= 3:
+                self._minecraft_window = None
+                self._fishing_roi = None
+                self._tracking_box = None
+                self._detection_box = None
+                self._invalidate_vision_epoch()
+            return False
+
+        self._consecutive_capture_failures = 0
+        self._last_capture_error = None
+        self._latest_window_frame = result.window_frame.copy()
+        self._latest_debug_composite = result.debug_composite.copy()
+        self._line_candidate = result.line_candidate
+        self._line_pixels = result.line_pixels
+        self._cursor_image = result.tracking_preview
+        self._set_rod_in_hand(result.rod_in_hand)
+
+        if self._tracking_box is None and result.suggested_tracking_box is not None:
+            self._tracking_box = result.suggested_tracking_box
+        if self._detection_box is None and result.suggested_detection_box is not None:
+            self._detection_box = result.suggested_detection_box
+
+        previous_bite_detected = self._bite_detected
+        self._bite_detected = self._line_watcher.observe(
+            self._line_pixels,
+            active=self._is_fishing and self._is_line_out,
+        )
+        if self._bite_detected and not previous_bite_detected:
+            self._record_detection_event(event="bite_detected", source="vision")
+
+        preview_start = monotonic()
+        if self._viewer is not None:
+            self._viewer.update(result.main_preview_frame)
+        if self._debug_viewer is not None:
+            self._debug_viewer.update(
+                result.tracking_preview.original,
+                result.tracking_preview.computer,
+            )
+        self._last_preview_duration_ms = round((monotonic() - preview_start) * 1000, 1)
+
+        if self._is_fish_on():
+            self._catch_count += 1
+            self._last_bite_indicator_at = monotonic()
+            self._reel_and_recast(source="vision")
+        return True
+
     def _tick(self) -> None:
         if self._root is None:
             return
 
         start_time = monotonic()
-        capture_duration_ms = 0.0
-        detect_duration_ms = 0.0
-        preview_duration_ms = 0.0
         record_duration_ms = 0.0
+        self._drain_recording_events()
+        self._drain_vision_results()
 
         if self._should_capture_preview():
             self._maybe_refresh_tracking_context(now=monotonic())
-            (
-                capture_duration_ms,
-                detect_duration_ms,
-                preview_duration_ms,
-            ) = self._update_image_profiled()
+            self._submit_vision_request(now=monotonic())
             tick_now = monotonic()
             record_start = monotonic()
             self._maybe_record_frame(now=tick_now)
@@ -1596,9 +1757,9 @@ class AutoFishTkApp:
             self._append_profile_row(
                 now=monotonic(),
                 total_ms=duration_ms,
-                capture_ms=capture_duration_ms,
-                detect_ms=detect_duration_ms,
-                preview_ms=preview_duration_ms,
+                capture_ms=self._last_capture_duration_ms,
+                detect_ms=self._last_detect_duration_ms,
+                preview_ms=self._last_preview_duration_ms,
                 record_ms=record_duration_ms,
             )
 
@@ -1616,17 +1777,14 @@ class AutoFishTkApp:
             self._profiler.add(
                 TickProfile(
                     total_ms=duration_ms,
-                    capture_ms=capture_duration_ms,
-                    detect_ms=detect_duration_ms,
-                    preview_ms=preview_duration_ms,
+                    capture_ms=self._last_capture_duration_ms,
+                    detect_ms=self._last_detect_duration_ms,
+                    preview_ms=self._last_preview_duration_ms,
                     record_ms=record_duration_ms,
                 )
             )
             summary = self._profiler.summary()
             self._last_tick_duration_ms = duration_ms
-            self._last_capture_duration_ms = capture_duration_ms
-            self._last_detect_duration_ms = detect_duration_ms
-            self._last_preview_duration_ms = preview_duration_ms
             self._last_record_duration_ms = record_duration_ms
             avg_ms = round(summary.avg_total_ms, 1)
             avg_capture_ms = round(summary.avg_capture_ms, 1)
@@ -1807,19 +1965,26 @@ class AutoFishTkApp:
             return
 
         if key == keyboard.Key.f7:
+            logger.info("Hotkey pressed: f7")
             root.after(0, self._toggle_recording)
         elif key == keyboard.Key.f8:
+            logger.info("Hotkey pressed: f8")
             root.after(0, self._manual_action)
         elif key == keyboard.Key.f12:
+            logger.info("Hotkey pressed: f12")
             root.after(0, self._toggle_fishing_hotkey)
         elif key == keyboard.Key.f9:
+            logger.info("Hotkey pressed: f9")
             root.after(0, self._refresh_tracking_context)
         elif key == keyboard.Key.esc:
-            root.after(0, self._stop)
+            logger.info("Hotkey pressed: esc")
+            root.after(0, partial(self._stop, source="hotkey_esc"))
         elif key == keyboard.Key.f10:
+            logger.info("Hotkey pressed: f10")
             root.after(0, self._toggle_debug_window)
 
     def _refresh_tracking_context(self) -> None:
+        self._invalidate_vision_epoch()
         if not self._locate_minecraft_window():
             return
         self._calibrate_line()
@@ -1830,11 +1995,12 @@ class AutoFishTkApp:
 
         self._exiting = True
         self._save_window_geometry()
-        self._stop()
+        self._stop(source="quit")
         try:
             self._keyboard_listener.stop()
         finally:
             self._close_session_recorder()
+            self._close_vision_worker()
             if self._audio_monitor is not None:
                 self._audio_monitor.close()
             self._capture_backend.close()

@@ -31,6 +31,7 @@ def test_maybe_record_frame_saves_on_interval(tmp_path: Path, monkeypatch) -> No
     first = app._maybe_record_frame(now=1.0)
     second = app._maybe_record_frame(now=1.5)
     third = app._maybe_record_frame(now=2.1)
+    app._close_recording_worker()
 
     assert first == tmp_path / "sessions" / "20260307-213938-recording-00.png"
     assert first.exists()
@@ -83,7 +84,12 @@ def test_append_profile_row_writes_stage_timings(tmp_path: Path, monkeypatch) ->
 
     assert path == tmp_path / "sessions" / "s" / "s-profile.csv"
     assert path.exists()
-    assert path.read_text().splitlines()[1].endswith(",100.0,70.0,10.0,15.0,5.0,50,80")
+    header, row = path.read_text().splitlines()
+    assert "vision_age_ms" in header
+    assert "vision_dropped_frames" in header
+    assert "record_queue_depth" in header
+    assert "record_dropped_frames" in header
+    assert row.endswith(",100.0,70.0,10.0,15.0,5.0,0.0,0,0,0,50,80")
 
 
 def test_mark_bite_appends_mark_event(tmp_path: Path, monkeypatch) -> None:
@@ -268,6 +274,85 @@ def test_append_trace_row_includes_rod_state_and_catch_count(tmp_path: Path, mon
     )
 
     assert path.read_text().splitlines()[1].endswith(",system,,1,3")
+
+
+def test_append_trace_row_logs_event_summary(monkeypatch) -> None:
+    app = AutoFishTkApp()
+    app._is_fishing = True
+    app._is_line_out = False
+    app._line_pixels = 12
+    app._bite_detected = True
+    app._rod_in_hand = True
+    app._catch_count = 4
+    messages: list[str] = []
+
+    monkeypatch.setattr(
+        "autoangler.gui_tk.logger.info",
+        lambda message, *args: messages.append(message % args if args else message),
+    )
+
+    app._append_trace_row(
+        now=12.5,
+        event="strafe",
+        source="auto_strafe",
+        scheduled_delay_ms=487,
+        strafe_direction="left",
+        strafe_duration_ms=122,
+    )
+
+    assert messages == [
+        "EVENT strafe source=auto_strafe is_fishing=1 is_line_out=0 line_pixels=12 "
+        "trigger_pixels=0 weak_frames=0 bite_detected=1 rod_in_hand=1 catch_count=4 "
+        "scheduled_delay_ms=487 strafe_direction=left strafe_duration_ms=122"
+    ]
+
+
+def test_append_trace_row_logs_tick_at_debug(monkeypatch) -> None:
+    app = AutoFishTkApp()
+    info_messages: list[str] = []
+    debug_messages: list[str] = []
+
+    monkeypatch.setattr(
+        "autoangler.gui_tk.logger.info",
+        lambda message, *args: info_messages.append(message % args if args else message),
+    )
+    monkeypatch.setattr(
+        "autoangler.gui_tk.logger.debug",
+        lambda message, *args: debug_messages.append(message % args if args else message),
+    )
+
+    app._append_trace_row(now=12.5, event="tick")
+
+    assert info_messages == []
+    assert debug_messages == [
+        "EVENT tick source=system is_fishing=0 is_line_out=0 line_pixels=0 "
+        "trigger_pixels=0 weak_frames=0 bite_detected=0 rod_in_hand=0 catch_count=0"
+    ]
+
+
+def test_stop_records_source_in_trace(monkeypatch) -> None:
+    app = AutoFishTkApp()
+    app._recording_enabled = True
+    app._is_fishing = True
+    trace_calls: list[dict[str, object]] = []
+
+    class FakeButton:
+        def configure(self, **_kwargs) -> None:
+            return None
+
+    app._button = FakeButton()
+
+    monkeypatch.setattr(
+        app,
+        "_append_trace_row",
+        lambda **kwargs: trace_calls.append(kwargs) or Path("/tmp/trace.csv"),
+    )
+
+    app._stop(source="hotkey_esc")
+
+    assert len(trace_calls) == 1
+    assert trace_calls[0]["event"] == "stop"
+    assert trace_calls[0]["source"] == "hotkey_esc"
 
 
 def test_cast_increments_cast_counter(monkeypatch) -> None:

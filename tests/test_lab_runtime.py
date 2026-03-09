@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
+from autoangler.async_pipeline import VisionResult
 from autoangler.audio_probe import AudioHintEvent
+from autoangler.cursor_image import CursorImage
 from autoangler.gui_tk import AutoFishTkApp
 from autoangler.profile_session import summarize_session
 from autoangler.runtime_config import DelayRange, RuntimeConfig
@@ -129,8 +133,9 @@ def test_append_profile_row_writes_runtime_metadata(tmp_path: Path, monkeypatch)
     header, row = path.read_text().splitlines()
     assert "cast_settle_min_ms" in header
     assert "auto_strafe_enabled" in header
+    assert "vision_age_ms" in header
     assert ",2800,3200,350,900,1,1,0," in row
-    assert row.endswith(",100.0,70.0,10.0,15.0,5.0,0,0")
+    assert row.endswith(",100.0,70.0,10.0,15.0,5.0,0.0,0,0,0,0,0")
 
 
 def test_drain_audio_hints_records_trace_event(tmp_path: Path, monkeypatch) -> None:
@@ -270,3 +275,75 @@ def test_summarize_session_reports_event_counts_and_trigger_sequence(tmp_path: P
     assert summary["triggerSequence"][1]["source"] == "audio"
     assert summary["triggerSequence"][2]["strafeDirection"] == "left"
     assert summary["triggerSequence"][3]["scheduledDelayMs"] == 420
+
+
+def test_apply_vision_result_ignores_stale_epoch(monkeypatch) -> None:
+    app = AutoFishTkApp()
+    app._vision_epoch = 4
+    app._last_applied_vision_seq = 10
+    app._line_pixels = 12
+    app._rod_in_hand = True
+    calls: list[str] = []
+
+    monkeypatch.setattr(app, "_reel_and_recast", lambda source="system": calls.append(source))
+
+    applied = app._apply_vision_result(_vision_result(epoch=3, seq=11, line_pixels=0))
+
+    assert applied is False
+    assert app._line_pixels == 12
+    assert app._rod_in_hand is True
+    assert calls == []
+
+
+def test_apply_vision_result_updates_state_on_main_thread(monkeypatch) -> None:
+    app = AutoFishTkApp()
+    app._vision_epoch = 2
+    app._last_applied_vision_seq = 0
+    app._is_fishing = True
+    app._is_line_out = True
+    app._viewer = type("Viewer", (), {"update": lambda self, image: None})()
+    app._debug_viewer = type("Viewer", (), {"update": lambda self, image, secondary=None: None})()
+    app._line_watcher.observe(20, active=True)
+    events: list[str] = []
+
+    monkeypatch.setattr(
+        app,
+        "_record_detection_event",
+        lambda **_kwargs: events.append("detection"),
+    )
+    monkeypatch.setattr(app, "_reel_and_recast", lambda source="system": events.append(source))
+
+    applied = app._apply_vision_result(_vision_result(epoch=2, seq=1, line_pixels=0))
+
+    assert applied is True
+    assert app._last_applied_vision_seq == 1
+    assert app._line_pixels == 0
+    assert app._bite_detected is True
+    assert events == ["detection", "vision"]
+
+
+def _vision_result(*, epoch: int, seq: int, line_pixels: int) -> VisionResult:
+    original = np.full((6, 6), 255, dtype=np.uint8)
+    computer = np.full((6, 6), 255, dtype=np.uint8)
+    return VisionResult(
+        epoch=epoch,
+        seq=seq,
+        completed_at=1.25,
+        window_frame=original,
+        main_preview_frame=original,
+        tracking_preview=CursorImage(
+            original=original,
+            computer=computer,
+            black_pixel_count=line_pixels,
+        ),
+        debug_composite=np.zeros((6, 12, 3), dtype=np.uint8),
+        rod_in_hand=False,
+        line_candidate=None,
+        line_pixels=line_pixels,
+        suggested_tracking_box=(1, 1, 4, 4),
+        suggested_detection_box=(2, 2, 5, 5),
+        capture_ms=10.0,
+        detect_ms=4.0,
+        annotate_ms=3.0,
+        capture_error=None,
+    )

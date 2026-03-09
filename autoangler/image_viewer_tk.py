@@ -7,8 +7,6 @@ from tkinter import ttk
 import numpy as np
 from PIL import Image, ImageTk
 
-from autoangler.cursor_image import CursorImage
-
 PREVIEW_MAX_WIDTH = 360
 PREVIEW_MAX_HEIGHT = 240
 
@@ -24,12 +22,13 @@ def fit_within(width: int, height: int, max_width: int, max_height: int) -> tupl
 @dataclass(frozen=True)
 class ImageViewerTkElements:
     frame: ttk.Frame
-    original_label: tk.Label
-    computer_label: tk.Label
+    primary_label: tk.Label
+    secondary_label: tk.Label | None
 
 
 class ImageViewerTk:
-    def __init__(self) -> None:
+    def __init__(self, *, dual: bool = True) -> None:
+        self._dual = dual
         self._photo_left: ImageTk.PhotoImage | None = None
         self._photo_right: ImageTk.PhotoImage | None = None
         self._elements: ImageViewerTkElements | None = None
@@ -39,34 +38,47 @@ class ImageViewerTk:
             return self._elements.frame
 
         frame = ttk.Frame(parent)
-        original_label = tk.Label(frame)
-        computer_label = tk.Label(frame)
+        primary_label = tk.Label(frame, highlightthickness=2)
+        secondary_label = tk.Label(frame) if self._dual else None
 
-        original_label.grid(row=0, column=0, padx=(0, 8), pady=8)
-        computer_label.grid(row=0, column=1, padx=(0, 0), pady=8)
+        primary_label.grid(row=0, column=0, padx=(0, 8 if self._dual else 0), pady=8)
+        if secondary_label is not None:
+            secondary_label.grid(row=0, column=1, padx=(0, 0), pady=8)
 
         self._elements = ImageViewerTkElements(
             frame=frame,
-            original_label=original_label,
-            computer_label=computer_label,
+            primary_label=primary_label,
+            secondary_label=secondary_label,
         )
         return frame
 
-    def update(self, image: CursorImage) -> None:
+    def update(self, image, secondary: np.ndarray | None = None) -> None:
         if self._elements is None:
             raise RuntimeError("Call frame(parent) before update().")
 
-        self._photo_left = self._as_photo(image.original)
-        self._photo_right = self._as_photo(image.computer)
+        primary = getattr(image, "original", image)
+        secondary_image = getattr(image, "computer", secondary)
 
-        self._elements.original_label.configure(image=self._photo_left)
-        self._elements.computer_label.configure(image=self._photo_right)
-        self._elements.original_label.image = self._photo_left
-        self._elements.computer_label.image = self._photo_right
+        self._photo_left = self._as_photo(primary)
+        self._elements.primary_label.configure(image=self._photo_left)
+        self._elements.primary_label.image = self._photo_left
+
+        if self._elements.secondary_label is not None and secondary_image is not None:
+            self._photo_right = self._as_photo(secondary_image)
+            self._elements.secondary_label.configure(image=self._photo_right)
+            self._elements.secondary_label.image = self._photo_right
+
+    def set_border(self, color: str) -> None:
+        if self._elements is None:
+            return
+        self._elements.primary_label.configure(highlightbackground=color, highlightcolor=color)
 
     @staticmethod
     def _as_photo(array: np.ndarray) -> ImageTk.PhotoImage:
-        pil = Image.fromarray(array.astype("uint8"), mode="L")
+        if array.ndim == 3:
+            pil = Image.fromarray(array.astype("uint8"), mode="RGB")
+        else:
+            pil = Image.fromarray(array.astype("uint8"), mode="L")
         new_size = fit_within(pil.width, pil.height, PREVIEW_MAX_WIDTH, PREVIEW_MAX_HEIGHT)
         if new_size != pil.size:
             pil = pil.resize(new_size, Image.Resampling.NEAREST)

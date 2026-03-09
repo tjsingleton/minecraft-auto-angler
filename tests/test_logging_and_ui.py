@@ -152,6 +152,7 @@ def test_maybe_save_debug_screenshot_writes_file_in_debug_mode(
         path = app._maybe_save_debug_screenshot("calibrate")
     finally:
         logger.setLevel(original_level)
+    app._close_recording_worker()
 
     assert path == tmp_path / "sessions" / "20260307-211730-calibrate-00.png"
     assert path.exists()
@@ -229,22 +230,25 @@ def test_toggle_auto_strafe_uses_checkbox_state() -> None:
     assert app._auto_strafe_enabled is False
 
 
-def test_toggle_recording_closes_session_recorder_when_disabling() -> None:
+def test_toggle_recording_closes_recording_worker_when_disabling() -> None:
     app = AutoFishTkApp()
     app._recording_enabled = True
     closed: list[str] = []
 
-    class FakeRecorder:
+    class FakeWorker:
         def close(self) -> None:
             closed.append("closed")
 
-    app._session_recorder = FakeRecorder()  # type: ignore[assignment]
+        def poll_events(self) -> list[object]:
+            return []
+
+    app._recording_worker = FakeWorker()  # type: ignore[assignment]
 
     app._toggle_recording()
 
     assert app._recording_enabled is False
     assert closed == ["closed"]
-    assert app._session_recorder is None
+    assert app._recording_worker is None
 
 
 def test_open_session_folder_uses_active_session_directory(
@@ -329,11 +333,11 @@ def test_hotkey_toggle_stops_when_already_fishing() -> None:
     calls: list[str] = []
 
     app._is_fishing = True
-    app._stop = lambda: calls.append("stop")  # type: ignore[method-assign]
+    app._stop = lambda *, source="system": calls.append(source)  # type: ignore[method-assign]
 
     app._toggle_fishing()
 
-    assert calls == ["stop"]
+    assert calls == ["button"]
 
 
 def test_tick_uses_delayed_recast_after_bite() -> None:
@@ -425,6 +429,26 @@ def test_debug_details_text_reports_top_stage() -> None:
     assert "top:capture" in text
 
 
+def test_profile_summary_text_includes_async_metrics() -> None:
+    app = AutoFishTkApp()
+    app._last_tick_duration_ms = 100.0
+    app._last_capture_duration_ms = 70.0
+    app._last_detect_duration_ms = 10.0
+    app._last_preview_duration_ms = 5.0
+    app._last_record_duration_ms = 4.0
+    app._last_vision_age_ms = 14.5
+    app._vision_dropped_frames = 2
+    app._record_queue_depth = 3
+    app._record_dropped_frames = 1
+
+    text = app._profile_summary_text()
+
+    assert "vage:14.5ms" in text
+    assert "vdrop:2" in text
+    assert "rqueue:3" in text
+    assert "rdrop:1" in text
+
+
 def test_maybe_refresh_tracking_context_recalibrates_when_window_geometry_changes(
     monkeypatch,
 ) -> None:
@@ -507,6 +531,28 @@ def test_on_key_press_ignores_removed_f6_hotkey() -> None:
     app._on_key_press(keyboard.Key.f6)
 
     assert calls == []
+
+
+def test_on_key_press_routes_esc_to_stop_with_hotkey_source(monkeypatch) -> None:
+    app = AutoFishTkApp()
+    stop_sources: list[str] = []
+    messages: list[str] = []
+
+    class FakeRoot:
+        def after(self, _delay_ms: int, callback) -> None:
+            callback()
+
+    monkeypatch.setattr(
+        "autoangler.gui_tk.logger.info",
+        lambda message, *args: messages.append(message % args if args else message),
+    )
+    app._root = FakeRoot()
+    app._stop = lambda *, source="system": stop_sources.append(source)  # type: ignore[method-assign]
+
+    app._on_key_press(keyboard.Key.esc)
+
+    assert stop_sources == ["hotkey_esc"]
+    assert "Hotkey pressed: esc" in messages
 
 
 def test_on_key_press_routes_f10_to_debug_window_toggle() -> None:
