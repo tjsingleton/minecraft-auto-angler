@@ -72,6 +72,7 @@ def test_hotkey_hint_text_includes_expected_keys() -> None:
     assert "F12" in text
     assert "F9" in text
     assert "F10" in text
+    assert "ESC" not in text
     assert "Cmd+Q" in text
 
 
@@ -470,7 +471,7 @@ def test_profile_summary_text_includes_async_metrics() -> None:
     assert "rdrop:1" in text
 
 
-def test_maybe_refresh_tracking_context_recalibrates_when_window_geometry_changes(
+def test_maybe_refresh_tracking_context_refreshes_preview_context_when_window_geometry_changes(
     monkeypatch,
 ) -> None:
     app = AutoFishTkApp()
@@ -487,7 +488,7 @@ def test_maybe_refresh_tracking_context_recalibrates_when_window_geometry_change
     )()
 
     monkeypatch.setattr("autoangler.gui_tk.selected_minecraft_window", lambda: new_window)
-    monkeypatch.setattr(app, "_refresh_tracking_context", lambda: calls.append("refresh"))
+    monkeypatch.setattr(app, "_refresh_preview_context", lambda: calls.append("refresh"))
 
     app._maybe_refresh_tracking_context(now=10.0)
 
@@ -554,26 +555,19 @@ def test_on_key_press_ignores_removed_f6_hotkey() -> None:
     assert calls == []
 
 
-def test_on_key_press_routes_esc_to_stop_with_hotkey_source(monkeypatch) -> None:
+def test_on_key_press_ignores_esc_hotkey() -> None:
     app = AutoFishTkApp()
-    stop_sources: list[str] = []
-    messages: list[str] = []
+    calls: list[tuple[int, object]] = []
 
     class FakeRoot:
-        def after(self, _delay_ms: int, callback) -> None:
-            callback()
+        def after(self, delay_ms: int, callback) -> None:
+            calls.append((delay_ms, callback))
 
-    monkeypatch.setattr(
-        "autoangler.gui_tk.logger.info",
-        lambda message, *args: messages.append(message % args if args else message),
-    )
     app._root = FakeRoot()
-    app._stop = lambda *, source="system": stop_sources.append(source)  # type: ignore[method-assign]
 
     app._on_key_press(keyboard.Key.esc)
 
-    assert stop_sources == ["hotkey_esc"]
-    assert "Hotkey pressed: esc" in messages
+    assert calls == []
 
 
 def test_on_key_press_routes_f10_to_debug_window_toggle() -> None:

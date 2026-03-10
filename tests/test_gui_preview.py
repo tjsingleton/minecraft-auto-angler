@@ -38,6 +38,20 @@ def test_main_preview_frame_uses_roi_only() -> None:
     assert preview.shape == (120, 140)
 
 
+def test_main_preview_frame_draws_guides_with_2px_strokes() -> None:
+    app = AutoFishTkApp()
+    app._tracking_box = (30, 40, 70, 90)
+    app._detection_box = (35, 55, 60, 80)
+    window_frame = np.full((220, 260), 255, dtype=np.uint8)
+    roi_box = (40, 30, 180, 150)
+    roi_frame = window_frame[30:150, 40:180]
+
+    preview = app._build_main_preview_frame(window_frame, roi_box, roi_frame)
+
+    assert int(preview[41, 31]) == 0
+    assert int(preview[56, 36]) == 64
+
+
 def test_main_preview_validates_rod_state_when_line_is_in() -> None:
     app = AutoFishTkApp()
     app._is_line_out = False

@@ -102,6 +102,11 @@ def summarize_session(profile_csv: Path) -> dict[str, object]:
                 "scheduledDelayMs": _parse_int(row.get("scheduled_delay_ms")),
                 "strafeDirection": row.get("strafe_direction", ""),
                 "strafeDurationMs": _parse_int(row.get("strafe_duration_ms")),
+                "strafeOffsetSteps": _parse_int(row.get("strafe_offset_steps")),
+                "mouseDxPx": _parse_int(row.get("mouse_dx_px")),
+                "mouseDyPx": _parse_int(row.get("mouse_dy_px")),
+                "mouseOffsetXPx": _parse_int(row.get("mouse_offset_x_px")),
+                "mouseOffsetYPx": _parse_int(row.get("mouse_offset_y_px")),
             }
         )
 

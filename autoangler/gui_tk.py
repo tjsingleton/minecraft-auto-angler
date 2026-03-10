@@ -8,7 +8,7 @@ import re
 import subprocess
 import sys
 from csv import DictWriter
-from functools import partial
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from time import monotonic, sleep, time
@@ -66,14 +66,29 @@ MINECRAFT_IRL_SECONDS_PER_MC_HOUR = MINECRAFT_IRL_MINUTES_PER_MC_HOUR * 60
 
 logger = logging.getLogger(__name__)
 DEFAULT_WINDOW_GEOMETRY = "384x328+300+0"
-AUTO_STRAFE_DURATION = DelayRange(minimum_ms=100, maximum_ms=250)
+GUIDE_STROKE_PX = 2
+IDLE_CAPTURE_INTERVAL_S = 0.5
+AUTO_STRAFE_STEP_MS = 300
+AUTO_STRAFE_MAX_OFFSET_STEPS = 4
+AUTO_MOUSE_DRIFT_STEP_X_PX = 4
+AUTO_MOUSE_DRIFT_STEP_Y_PX = 2
+AUTO_MOUSE_DRIFT_MAX_X_PX = 16
+AUTO_MOUSE_DRIFT_MAX_Y_PX = 8
+AUTO_MOUSE_DRIFT_STEP_DELAY_MS = 80
+
+
+@dataclass
+class MovementState:
+    current_strafe_offset_steps: int = 0
+    current_mouse_offset_x_px: int = 0
+    current_mouse_offset_y_px: int = 0
 
 
 def hotkey_hint_text(hotkeys_enabled: bool) -> str:
     suffix = "" if hotkeys_enabled else " (global hotkeys disabled)"
     return (
         "Hotkeys: F7 record | F8 manual cast/reel + detector mark | "
-        f"F9 locate+calibrate | F10 debug | F12 start/stop | ESC stop | Cmd+Q exit{suffix}"
+        f"F9 locate+calibrate | F10 debug | F12 start/stop | Cmd+Q exit{suffix}"
     )
 
 
@@ -172,6 +187,7 @@ class AutoFishTkApp:
         self._vision_dropped_frames = 0
         self._record_queue_depth = 0
         self._record_dropped_frames = 0
+        self._preview_state = "neutral"
 
         self._viewer: Any | None = None
         self._debug_viewer: Any | None = None
@@ -217,6 +233,7 @@ class AutoFishTkApp:
         self._hotkey_hint_var: Any | None = None
         self._auto_strafe_var: Any | None = None
         self._auto_strafe_enabled = self._runtime_config.auto_strafe_enabled
+        self._movement_state = MovementState()
 
         self._keyboard_listener = keyboard.Listener(on_press=self._on_key_press)
         self._hotkeys_enabled = False
@@ -309,7 +326,7 @@ class AutoFishTkApp:
         if not self._hotkeys_enabled and sys.platform == "darwin":
             messagebox.showwarning(
                 "Enable Accessibility Permissions",
-                "Global hotkeys (F7/F8/F9/F10/F12/ESC) are disabled because this process "
+                "Global hotkeys (F7/F8/F9/F10/F12) are disabled because this process "
                 "is not trusted "
                 "for "
                 "input event monitoring.\n\n"
@@ -319,7 +336,7 @@ class AutoFishTkApp:
                 "You can still use the menu bar.",
             )
 
-        self._refresh_tracking_context()
+        self._bootstrap_idle_preview()
         self._tick()
         root.mainloop()
 
@@ -414,7 +431,7 @@ class AutoFishTkApp:
         self._set_indicator_color(self._bite_dot, bite_color)
 
         if self._viewer is not None:
-            self._viewer.set_border("#1f8f3a" if self._main_preview_is_valid() else "#8c1d18")
+            self._viewer.set_border(self._preview_border_color())
         if self._debug_var is not None:
             self._debug_var.set(self._debug_stats_text())
 
@@ -444,6 +461,47 @@ class AutoFishTkApp:
         self._last_vision_completed_at = None
         self._last_vision_age_ms = 0.0
         self._last_vision_submit_at = 0.0
+
+    def _bootstrap_idle_preview(self) -> None:
+        self._refresh_preview_context()
+
+    def _refresh_preview_context(self) -> bool:
+        if not self._locate_minecraft_window():
+            return False
+        self._seed_default_guide_boxes()
+        return True
+
+    def _seed_default_guide_boxes(self) -> None:
+        if self._minecraft_window is None or self._fishing_roi is None:
+            return
+        x1, y1, x2, y2 = window_relative_box(self._fishing_roi, self._minecraft_window)
+        roi_frame = np.zeros((max(1, y2 - y1), max(1, x2 - x1)), dtype=np.uint8)
+        self._tracking_box = self._default_tracking_box(roi_frame)
+        self._detection_box = self._default_detection_box(roi_frame)
+        self._line_candidate = None
+        self._line_pixels = 0
+        self._bite_detected = False
+        self._rod_in_hand = False
+        self._line_watcher.reset()
+        self._preview_state = "neutral"
+
+    def _vision_mode(self) -> str:
+        return "fishing" if self._is_fishing else "idle_preview"
+
+    def _vision_capture_interval_s(self) -> float:
+        if self._vision_mode() == "idle_preview":
+            return IDLE_CAPTURE_INTERVAL_S
+        return self._max_capture_interval_s()
+
+    def _preview_border_color(self) -> str:
+        if self._preview_state == "valid":
+            return "#1f8f3a"
+        if self._preview_state == "invalid":
+            return "#8c1d18"
+        return "#68727c"
+
+    def _should_write_profile_row(self) -> bool:
+        return self._is_fishing or self._recording_enabled
 
     @staticmethod
     def _max_capture_interval_s() -> float:
@@ -597,6 +655,7 @@ class AutoFishTkApp:
         self._cast_count = 0
         self._last_bite_indicator_at = 0.0
         self._line_watcher.reset()
+        self._reset_movement_state()
         self._invalidate_vision_epoch()
 
         if self._button is not None:
@@ -622,6 +681,7 @@ class AutoFishTkApp:
         self._start_clock = None
         self._bite_detected = False
         self._line_watcher.reset()
+        self._reset_movement_state()
         self._invalidate_vision_epoch()
 
         if not self._exiting:
@@ -663,6 +723,7 @@ class AutoFishTkApp:
         self._line_candidate = None
         self._line_pixels = 0
         self._bite_detected = False
+        self._preview_state = "neutral"
         self._line_watcher.reset()
         self._invalidate_vision_epoch()
         logger.info("Using Minecraft window '%s' at %s", window.title, window)
@@ -709,7 +770,7 @@ class AutoFishTkApp:
     def _ensure_tracking_context(self) -> bool:
         if self._minecraft_window is not None and self._fishing_roi is not None:
             return True
-        return self._locate_minecraft_window()
+        return self._refresh_preview_context()
 
     def _capture_window_image(self) -> CursorImage | None:
         if self._minecraft_window is None:
@@ -781,7 +842,7 @@ class AutoFishTkApp:
 
         width = 44
         height = 36
-        left = anchor_x - 24
+        left = anchor_x - (width // 2)
         top = anchor_y + 8
         return self._clamp_box(frame.shape, left=left, top=top, width=width, height=height)
 
@@ -856,7 +917,7 @@ class AutoFishTkApp:
             (roi_left, roi_top),
             (roi_right, roi_bottom),
             color=160,
-            thickness=1,
+            thickness=GUIDE_STROKE_PX,
         )
 
         x1, y1, x2, y2 = tracking_box
@@ -865,7 +926,7 @@ class AutoFishTkApp:
             (roi_left + x1, roi_top + y1),
             (roi_left + x2, roi_top + y2),
             color=0,
-            thickness=1,
+            thickness=GUIDE_STROKE_PX,
         )
 
         dx1, dy1, dx2, dy2 = detection_box
@@ -874,7 +935,7 @@ class AutoFishTkApp:
             (roi_left + dx1, roi_top + dy1),
             (roi_left + dx2, roi_top + dy2),
             color=64,
-            thickness=1,
+            thickness=GUIDE_STROKE_PX,
         )
 
         if self._line_candidate is not None:
@@ -908,6 +969,8 @@ class AutoFishTkApp:
         window_frame: np.ndarray,
         roi_box: tuple[int, int, int, int],
         roi_frame: np.ndarray,
+        *,
+        preview_state: str | None = None,
     ) -> np.ndarray:
         del window_frame, roi_box
         annotated = roi_frame.copy()
@@ -915,17 +978,20 @@ class AutoFishTkApp:
         detection_box, _detection_frame = self._detection_frame(roi_frame)
 
         x1, y1, x2, y2 = tracking_box
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color=0, thickness=1)
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color=0, thickness=GUIDE_STROKE_PX)
 
         dx1, dy1, dx2, dy2 = detection_box
-        cv2.rectangle(annotated, (dx1, dy1), (dx2, dy2), color=64, thickness=1)
+        cv2.rectangle(annotated, (dx1, dy1), (dx2, dy2), color=64, thickness=GUIDE_STROKE_PX)
 
         if self._line_candidate is not None:
             lx1, ly1, lx2, ly2 = self._line_candidate.bbox
             cv2.rectangle(annotated, (lx1, ly1), (lx2, ly2), color=96, thickness=1)
             cv2.circle(annotated, self._line_candidate.center, radius=2, color=96, thickness=-1)
 
-        border_color = 96 if self._main_preview_is_valid() else 0
+        border_state = preview_state or self._preview_state
+        if border_state not in {"neutral", "valid", "invalid"}:
+            border_state = "valid" if self._main_preview_is_valid() else "invalid"
+        border_color = 128 if border_state == "neutral" else 96 if border_state == "valid" else 0
         height, width = annotated.shape[:2]
         cv2.rectangle(annotated, (0, 0), (width - 1, height - 1), color=border_color, thickness=2)
         return annotated
@@ -1180,6 +1246,11 @@ class AutoFishTkApp:
         audio_hint_peak: float | None = None,
         strafe_direction: str = "",
         strafe_duration_ms: int | None = None,
+        strafe_offset_steps: int | None = None,
+        mouse_dx_px: int | None = None,
+        mouse_dy_px: int | None = None,
+        mouse_offset_x_px: int | None = None,
+        mouse_offset_y_px: int | None = None,
     ) -> Path:
         log_path = os.environ.get("AUTOANGLER_SESSION_LOG", "").strip()
         if log_path:
@@ -1213,6 +1284,11 @@ class AutoFishTkApp:
                     "audio_hint_peak",
                     "strafe_direction",
                     "strafe_duration_ms",
+                    "strafe_offset_steps",
+                    "mouse_dx_px",
+                    "mouse_dy_px",
+                    "mouse_offset_x_px",
+                    "mouse_offset_y_px",
                     "source",
                     "training_label",
                     "rod_in_hand",
@@ -1248,6 +1324,17 @@ class AutoFishTkApp:
                     "strafe_duration_ms": (
                         "" if strafe_duration_ms is None else strafe_duration_ms
                     ),
+                    "strafe_offset_steps": (
+                        "" if strafe_offset_steps is None else strafe_offset_steps
+                    ),
+                    "mouse_dx_px": "" if mouse_dx_px is None else mouse_dx_px,
+                    "mouse_dy_px": "" if mouse_dy_px is None else mouse_dy_px,
+                    "mouse_offset_x_px": (
+                        "" if mouse_offset_x_px is None else mouse_offset_x_px
+                    ),
+                    "mouse_offset_y_px": (
+                        "" if mouse_offset_y_px is None else mouse_offset_y_px
+                    ),
                     "source": source,
                     "training_label": training_label,
                     "rod_in_hand": int(self._rod_in_hand),
@@ -1277,6 +1364,16 @@ class AutoFishTkApp:
             event_parts.append(f"strafe_direction={strafe_direction}")
         if strafe_duration_ms is not None:
             event_parts.append(f"strafe_duration_ms={strafe_duration_ms}")
+        if strafe_offset_steps is not None:
+            event_parts.append(f"strafe_offset_steps={strafe_offset_steps}")
+        if mouse_dx_px is not None:
+            event_parts.append(f"mouse_dx_px={mouse_dx_px}")
+        if mouse_dy_px is not None:
+            event_parts.append(f"mouse_dy_px={mouse_dy_px}")
+        if mouse_offset_x_px is not None:
+            event_parts.append(f"mouse_offset_x_px={mouse_offset_x_px}")
+        if mouse_offset_y_px is not None:
+            event_parts.append(f"mouse_offset_y_px={mouse_offset_y_px}")
         if training_label:
             event_parts.append(f"training_label={training_label}")
         event_message = "EVENT %s %s"
@@ -1538,6 +1635,9 @@ class AutoFishTkApp:
     def _choose_delay_ms(self, delay_range: DelayRange) -> int:
         return delay_range.choose(rng=self._random)
 
+    def _reset_movement_state(self) -> None:
+        self._movement_state = MovementState()
+
     def _cast(self) -> None:
         if self._root is None:
             return
@@ -1590,31 +1690,121 @@ class AutoFishTkApp:
             )
         self._root.after(recast_delay_ms, self._cast)
 
-    def _choose_strafe_direction(self) -> str:
-        return self._random.choice(["left", "right"])
+    def _choose_next_strafe_offset(self, current: int) -> int:
+        if current >= AUTO_STRAFE_MAX_OFFSET_STEPS:
+            return current - 1
+        if current <= -AUTO_STRAFE_MAX_OFFSET_STEPS:
+            return current + 1
+        if current == 0:
+            return self._random.choice([-1, 1])
+
+        toward_zero = current - 1 if current > 0 else current + 1
+        away_from_zero = current + 1 if current > 0 else current - 1
+        if self._random.random() < 0.7:
+            return toward_zero
+        return max(
+            -AUTO_STRAFE_MAX_OFFSET_STEPS,
+            min(AUTO_STRAFE_MAX_OFFSET_STEPS, away_from_zero),
+        )
+
+    def _choose_next_mouse_offset(
+        self,
+        current: int,
+        *,
+        step_px: int,
+        max_px: int,
+    ) -> int:
+        if current >= max_px:
+            return current - step_px
+        if current <= -max_px:
+            return current + step_px
+        if current == 0:
+            return self._random.choice([-step_px, step_px])
+
+        toward_zero = current - step_px if current > 0 else current + step_px
+        away_from_zero = current + step_px if current > 0 else current - step_px
+        if self._random.random() < 0.7:
+            return toward_zero
+        return max(-max_px, min(max_px, away_from_zero))
+
+    @staticmethod
+    def _scaled_mouse_delta(delta_px: int, *, remaining_delay_ms: int) -> int:
+        if delta_px == 0:
+            return 0
+        if remaining_delay_ms <= 0:
+            return 0
+        if remaining_delay_ms >= AUTO_MOUSE_DRIFT_STEP_DELAY_MS:
+            return delta_px
+
+        scaled = int(abs(delta_px) * remaining_delay_ms / AUTO_MOUSE_DRIFT_STEP_DELAY_MS)
+        if scaled <= 0:
+            return 0
+        return scaled if delta_px > 0 else -scaled
 
     def _maybe_auto_strafe(self, *, total_delay_ms: int) -> int:
         if not self._auto_strafe_enabled:
             return total_delay_ms
 
-        strafe_duration_ms = min(total_delay_ms, self._choose_delay_ms(AUTO_STRAFE_DURATION))
-        direction = self._choose_strafe_direction()
-        key = "a" if direction == "left" else "d"
-        pyautogui.keyDown(key)
-        try:
-            sleep(strafe_duration_ms / 1000)
-        finally:
-            pyautogui.keyUp(key)
+        movement = self._movement_state
+        target_strafe_offset = self._choose_next_strafe_offset(
+            movement.current_strafe_offset_steps
+        )
+        strafe_delta_steps = target_strafe_offset - movement.current_strafe_offset_steps
+        requested_strafe_duration_ms = abs(strafe_delta_steps) * AUTO_STRAFE_STEP_MS
+        strafe_duration_ms = min(total_delay_ms, requested_strafe_duration_ms)
+        strafe_direction = ""
+        if strafe_delta_steps != 0 and strafe_duration_ms > 0:
+            strafe_direction = "left" if strafe_delta_steps < 0 else "right"
+            key = "a" if strafe_direction == "left" else "d"
+            pyautogui.keyDown(key)
+            try:
+                sleep(strafe_duration_ms / 1000)
+            finally:
+                pyautogui.keyUp(key)
+            if strafe_duration_ms >= requested_strafe_duration_ms:
+                movement.current_strafe_offset_steps = target_strafe_offset
+
+        remaining_delay_ms = max(0, total_delay_ms - strafe_duration_ms)
+
+        target_mouse_offset_x = self._choose_next_mouse_offset(
+            movement.current_mouse_offset_x_px,
+            step_px=AUTO_MOUSE_DRIFT_STEP_X_PX,
+            max_px=AUTO_MOUSE_DRIFT_MAX_X_PX,
+        )
+        target_mouse_offset_y = self._choose_next_mouse_offset(
+            movement.current_mouse_offset_y_px,
+            step_px=AUTO_MOUSE_DRIFT_STEP_Y_PX,
+            max_px=AUTO_MOUSE_DRIFT_MAX_Y_PX,
+        )
+        desired_mouse_dx = target_mouse_offset_x - movement.current_mouse_offset_x_px
+        desired_mouse_dy = target_mouse_offset_y - movement.current_mouse_offset_y_px
+        mouse_dx = self._scaled_mouse_delta(
+            desired_mouse_dx,
+            remaining_delay_ms=remaining_delay_ms,
+        )
+        mouse_dy = self._scaled_mouse_delta(
+            desired_mouse_dy,
+            remaining_delay_ms=remaining_delay_ms,
+        )
+        if mouse_dx != 0 or mouse_dy != 0:
+            pyautogui.moveRel(mouse_dx, mouse_dy, duration=0)
+            movement.current_mouse_offset_x_px += mouse_dx
+            movement.current_mouse_offset_y_px += mouse_dy
 
         if self._recording_enabled:
             self._append_trace_row(
                 now=monotonic(),
                 event="strafe",
                 source="auto_strafe",
-                strafe_direction=direction,
+                strafe_direction=strafe_direction,
                 strafe_duration_ms=strafe_duration_ms,
+                strafe_offset_steps=movement.current_strafe_offset_steps,
+                mouse_dx_px=mouse_dx,
+                mouse_dy_px=mouse_dy,
+                mouse_offset_x_px=movement.current_mouse_offset_x_px,
+                mouse_offset_y_px=movement.current_mouse_offset_y_px,
             )
-        return max(0, total_delay_ms - strafe_duration_ms)
+        return remaining_delay_ms
 
     @staticmethod
     def _use_rod() -> None:
@@ -1636,8 +1826,8 @@ class AutoFishTkApp:
         self._last_context_refresh_at = now
 
         if self._minecraft_window is None:
-            if self._is_fishing:
-                self._refresh_tracking_context()
+            if self._should_capture_preview():
+                self._refresh_preview_context()
             return
 
         latest = selected_minecraft_window()
@@ -1646,10 +1836,10 @@ class AutoFishTkApp:
         if self._window_geometry_signature(latest) != self._window_geometry_signature(
             self._minecraft_window
         ):
-            self._refresh_tracking_context()
+            self._refresh_preview_context()
 
     def _submit_vision_request(self, *, now: float) -> None:
-        min_interval_s = self._max_capture_interval_s()
+        min_interval_s = self._vision_capture_interval_s()
         if self._last_vision_submit_at and (now - self._last_vision_submit_at) < min_interval_s:
             return
         self._last_vision_submit_at = now
@@ -1664,6 +1854,7 @@ class AutoFishTkApp:
             detection_box=self._detection_box,
             is_fishing=self._is_fishing,
             is_line_out=self._is_line_out,
+            mode=self._vision_mode(),
         )
         worker = self._ensure_vision_worker()
         worker.submit(request)
@@ -1697,6 +1888,7 @@ class AutoFishTkApp:
         if result.capture_error is not None:
             self._consecutive_capture_failures += 1
             self._last_capture_error = result.capture_error
+            self._preview_state = "invalid"
             if self._consecutive_capture_failures >= 3:
                 self._minecraft_window = None
                 self._fishing_roi = None
@@ -1712,6 +1904,7 @@ class AutoFishTkApp:
         self._line_candidate = result.line_candidate
         self._line_pixels = result.line_pixels
         self._cursor_image = result.tracking_preview
+        self._preview_state = result.preview_state
         self._set_rod_in_hand(result.rod_in_hand)
 
         if self._tracking_box is None and result.suggested_tracking_box is not None:
@@ -1770,7 +1963,7 @@ class AutoFishTkApp:
             self._reel_and_recast(source="vision")
 
         duration_ms = round((monotonic() - start_time) * 1000, 1)
-        if self._should_capture_preview():
+        if self._should_capture_preview() and self._should_write_profile_row():
             self._append_profile_row(
                 now=monotonic(),
                 total_ms=duration_ms,
@@ -1993,16 +2186,12 @@ class AutoFishTkApp:
         elif key == keyboard.Key.f9:
             logger.info("Hotkey pressed: f9")
             root.after(0, self._refresh_tracking_context)
-        elif key == keyboard.Key.esc:
-            logger.info("Hotkey pressed: esc")
-            root.after(0, partial(self._stop, source="hotkey_esc"))
         elif key == keyboard.Key.f10:
             logger.info("Hotkey pressed: f10")
             root.after(0, self._toggle_debug_window)
 
     def _refresh_tracking_context(self) -> None:
-        self._invalidate_vision_epoch()
-        if not self._locate_minecraft_window():
+        if not self._refresh_preview_context():
             return
         self._calibrate_line()
 

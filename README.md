@@ -109,7 +109,7 @@ Use these hotkeys while fishing:
 
 Use the `View` menu to toggle `Always On Top` and to open the debug window without using hotkeys.
 The app restores its last window position and always-on-top preference on launch.
-The main window also includes an `Auto-Strafe` checkbox. When enabled, AutoAngler taps left or right between reel and recast using a short randomized movement.
+The main window also includes an `Auto-Strafe` checkbox. When enabled, AutoAngler wanders between casts with larger bounded left/right movement plus a slight bounded mouse drift, both anchored back toward the session-start aim.
 
 While recording is armed, AutoAngler writes these artifacts into a per-run folder under `~/.autoangler/sessions/<session>/`:
 

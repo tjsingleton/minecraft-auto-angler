@@ -298,12 +298,19 @@ def test_append_trace_row_logs_event_summary(monkeypatch) -> None:
         scheduled_delay_ms=487,
         strafe_direction="left",
         strafe_duration_ms=122,
+        strafe_offset_steps=3,
+        mouse_dx_px=4,
+        mouse_dy_px=-1,
+        mouse_offset_x_px=12,
+        mouse_offset_y_px=-3,
     )
 
     assert messages == [
         "EVENT strafe source=auto_strafe is_fishing=1 is_line_out=0 line_pixels=12 "
         "trigger_pixels=0 weak_frames=0 bite_detected=1 rod_in_hand=1 catch_count=4 "
-        "scheduled_delay_ms=487 strafe_direction=left strafe_duration_ms=122"
+        "scheduled_delay_ms=487 strafe_direction=left strafe_duration_ms=122 "
+        "strafe_offset_steps=3 mouse_dx_px=4 mouse_dy_px=-1 "
+        "mouse_offset_x_px=12 mouse_offset_y_px=-3"
     ]
 
 

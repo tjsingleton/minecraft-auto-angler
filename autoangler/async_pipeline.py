@@ -21,6 +21,8 @@ from autoangler.rod_detector import RodDetector
 from autoangler.roi import cursor_anchor_in_roi, window_relative_box
 from autoangler.session_recorder import SessionRecorder
 
+GUIDE_STROKE_PX = 2
+
 
 @dataclass(frozen=True)
 class VisionRequest:
@@ -33,6 +35,7 @@ class VisionRequest:
     detection_box: tuple[int, int, int, int] | None
     is_fishing: bool
     is_line_out: bool
+    mode: Literal["idle_preview", "fishing"]
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,7 @@ class VisionResult:
     main_preview_frame: np.ndarray
     tracking_preview: CursorImage
     debug_composite: np.ndarray
+    preview_state: Literal["neutral", "valid", "invalid"]
     rod_in_hand: bool
     line_candidate: LineCandidate | None
     line_pixels: int
@@ -337,6 +341,9 @@ class VisionProcessor:
             status_lines=["status:waiting", "track:None detect:None", "line_px:0"],
         )
         if request.minecraft_window is None or request.fishing_roi is None:
+            preview_state: Literal["neutral", "valid", "invalid"] = (
+                "neutral" if request.mode == "idle_preview" else "invalid"
+            )
             return VisionResult(
                 epoch=request.epoch,
                 seq=request.seq,
@@ -345,6 +352,7 @@ class VisionProcessor:
                 main_preview_frame=blank.original,
                 tracking_preview=blank,
                 debug_composite=empty_debug,
+                preview_state=preview_state,
                 rod_in_hand=False,
                 line_candidate=None,
                 line_pixels=0,
@@ -375,6 +383,7 @@ class VisionProcessor:
                 main_preview_frame=blank.original,
                 tracking_preview=blank,
                 debug_composite=empty_debug,
+                preview_state="invalid",
                 rod_in_hand=False,
                 line_candidate=None,
                 line_pixels=0,
@@ -388,44 +397,50 @@ class VisionProcessor:
 
         capture_ms = round((monotonic() - capture_start) * 1000, 1)
         window_frame = window_image.original
-
-        detect_start = monotonic()
-        rod_in_hand = self._rod_detector.detect(window_frame, window=request.minecraft_window)
         roi_box, roi_frame = _window_frame_and_roi(
             window_frame,
             request.fishing_roi,
             request.minecraft_window,
         )
-        line_candidate = self._line_detector.find_line(roi_frame)
-        suggested_tracking_box = None
-        suggested_detection_box = None
-        if request.tracking_box is None and request.is_line_out:
-            suggested_tracking_box = _default_tracking_box(
-                roi_frame.shape,
-                minecraft_window=request.minecraft_window,
-                fishing_roi=request.fishing_roi,
-            )
-        if request.detection_box is None and request.is_line_out:
-            suggested_detection_box = _default_detection_box(
-                roi_frame.shape,
-                minecraft_window=request.minecraft_window,
-                fishing_roi=request.fishing_roi,
-            )
+        tracking_box = request.tracking_box or _default_tracking_box(
+            roi_frame.shape,
+            minecraft_window=request.minecraft_window,
+            fishing_roi=request.fishing_roi,
+        )
+        detection_box = request.detection_box or _default_detection_box(
+            roi_frame.shape,
+            minecraft_window=request.minecraft_window,
+            fishing_roi=request.fishing_roi,
+        )
+        suggested_tracking_box = tracking_box if request.tracking_box is None else None
+        suggested_detection_box = detection_box if request.detection_box is None else None
 
-        tracking_box = request.tracking_box or suggested_tracking_box or _default_tracking_box(
-            roi_frame.shape,
-            minecraft_window=request.minecraft_window,
-            fishing_roi=request.fishing_roi,
-        )
-        detection_box = request.detection_box or suggested_detection_box or _default_detection_box(
-            roi_frame.shape,
-            minecraft_window=request.minecraft_window,
-            fishing_roi=request.fishing_roi,
-        )
-        processed_tracking = self._line_detector.threshold_dark_pixels(
-            _crop_box(roi_frame, detection_box)
-        )
-        line_pixels = int(np.sum(processed_tracking == 0))
+        detect_start = monotonic()
+        if request.mode == "idle_preview":
+            rod_in_hand = False
+            line_candidate = None
+            processed_tracking = _crop_box(roi_frame, detection_box).copy()
+            line_pixels = 0
+            preview_state: Literal["neutral", "valid", "invalid"] = "neutral"
+            status_lines = [
+                "mode:idle_preview",
+                f"track:{tracking_box} detect:{detection_box}",
+                "candidate:-",
+            ]
+        else:
+            rod_in_hand = self._rod_detector.detect(window_frame, window=request.minecraft_window)
+            line_candidate = self._line_detector.find_line(roi_frame)
+            processed_tracking = self._line_detector.threshold_dark_pixels(
+                _crop_box(roi_frame, detection_box)
+            )
+            line_pixels = int(np.sum(processed_tracking == 0))
+            preview_valid = (line_pixels > 0) if request.is_line_out else rod_in_hand
+            preview_state = "valid" if preview_valid else "invalid"
+            status_lines = [
+                f"rod:{int(rod_in_hand)} line_px:{line_pixels}",
+                f"track:{tracking_box} detect:{detection_box}",
+                f"candidate:{'-' if line_candidate is None else line_candidate.center}",
+            ]
         detect_ms = round((monotonic() - detect_start) * 1000, 1)
 
         annotate_start = monotonic()
@@ -444,16 +459,12 @@ class VisionProcessor:
             tracking_box=tracking_box,
             detection_box=detection_box,
             line_candidate=line_candidate,
-            preview_valid=(line_pixels > 0) if request.is_line_out else rod_in_hand,
+            preview_state=preview_state,
         )
         debug_composite = _build_debug_composite(
             tracking_preview.original,
             tracking_preview.computer,
-            status_lines=[
-                f"rod:{int(rod_in_hand)} line_px:{line_pixels}",
-                f"track:{tracking_box} detect:{detection_box}",
-                f"candidate:{'-' if line_candidate is None else line_candidate.center}",
-            ],
+            status_lines=status_lines,
         )
         annotate_ms = round((monotonic() - annotate_start) * 1000, 1)
 
@@ -465,6 +476,7 @@ class VisionProcessor:
             main_preview_frame=main_preview_frame,
             tracking_preview=tracking_preview,
             debug_composite=debug_composite,
+            preview_state=preview_state,
             rod_in_hand=rod_in_hand,
             line_candidate=line_candidate,
             line_pixels=line_pixels,
@@ -529,7 +541,7 @@ def _default_detection_box(
 
     width = 44
     height = 36
-    left = anchor_x - 24
+    left = anchor_x - (width // 2)
     top = anchor_y + 8
     return _clamp_box(frame_shape, left=left, top=top, width=width, height=height)
 
@@ -574,7 +586,13 @@ def _build_tracking_preview(
 ) -> CursorImage:
     annotated = window_frame.copy()
     roi_left, roi_top, roi_right, roi_bottom = roi_box
-    cv2.rectangle(annotated, (roi_left, roi_top), (roi_right, roi_bottom), color=160, thickness=1)
+    cv2.rectangle(
+        annotated,
+        (roi_left, roi_top),
+        (roi_right, roi_bottom),
+        color=160,
+        thickness=GUIDE_STROKE_PX,
+    )
 
     x1, y1, x2, y2 = tracking_box
     cv2.rectangle(
@@ -582,7 +600,7 @@ def _build_tracking_preview(
         (roi_left + x1, roi_top + y1),
         (roi_left + x2, roi_top + y2),
         color=0,
-        thickness=1,
+        thickness=GUIDE_STROKE_PX,
     )
 
     dx1, dy1, dx2, dy2 = detection_box
@@ -591,7 +609,7 @@ def _build_tracking_preview(
         (roi_left + dx1, roi_top + dy1),
         (roi_left + dx2, roi_top + dy2),
         color=64,
-        thickness=1,
+        thickness=GUIDE_STROKE_PX,
     )
 
     if line_candidate is not None:
@@ -624,21 +642,21 @@ def _build_main_preview_frame(
     tracking_box: tuple[int, int, int, int],
     detection_box: tuple[int, int, int, int],
     line_candidate: LineCandidate | None,
-    preview_valid: bool,
+    preview_state: Literal["neutral", "valid", "invalid"],
 ) -> np.ndarray:
     annotated = roi_frame.copy()
     x1, y1, x2, y2 = tracking_box
-    cv2.rectangle(annotated, (x1, y1), (x2, y2), color=0, thickness=1)
+    cv2.rectangle(annotated, (x1, y1), (x2, y2), color=0, thickness=GUIDE_STROKE_PX)
 
     dx1, dy1, dx2, dy2 = detection_box
-    cv2.rectangle(annotated, (dx1, dy1), (dx2, dy2), color=64, thickness=1)
+    cv2.rectangle(annotated, (dx1, dy1), (dx2, dy2), color=64, thickness=GUIDE_STROKE_PX)
 
     if line_candidate is not None:
         lx1, ly1, lx2, ly2 = line_candidate.bbox
         cv2.rectangle(annotated, (lx1, ly1), (lx2, ly2), color=96, thickness=1)
         cv2.circle(annotated, line_candidate.center, radius=2, color=96, thickness=-1)
 
-    border_color = 96 if preview_valid else 0
+    border_color = 128 if preview_state == "neutral" else 96 if preview_state == "valid" else 0
     height, width = annotated.shape[:2]
     cv2.rectangle(annotated, (0, 0), (width - 1, height - 1), color=border_color, thickness=2)
     return annotated

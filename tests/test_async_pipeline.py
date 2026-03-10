@@ -6,8 +6,15 @@ from time import monotonic, sleep
 
 import numpy as np
 
-from autoangler.async_pipeline import RecordingWorker, VisionRequest, VisionResult, VisionWorker
+from autoangler.async_pipeline import (
+    RecordingWorker,
+    VisionProcessor,
+    VisionRequest,
+    VisionResult,
+    VisionWorker,
+)
 from autoangler.cursor_image import CursorImage
+from autoangler.minecraft_window import WindowInfo
 
 
 def test_recording_worker_saves_screenshot_and_emits_event(tmp_path: Path) -> None:
@@ -89,6 +96,7 @@ def test_vision_worker_overwrites_pending_request_with_newest() -> None:
             main_preview_frame=blank,
             tracking_preview=CursorImage(original=blank, computer=blank, black_pixel_count=0),
             debug_composite=np.zeros((4, 8, 3), dtype=np.uint8),
+            preview_state="neutral",
             rod_in_hand=False,
             line_candidate=None,
             line_pixels=0,
@@ -115,6 +123,48 @@ def test_vision_worker_overwrites_pending_request_with_newest() -> None:
     assert worker.dropped_frames == 1
 
 
+def test_vision_processor_idle_preview_skips_expensive_detectors_and_returns_neutral_state() -> None:
+    processor = VisionProcessor()
+    window = WindowInfo(title="Minecraft", left=18, top=30, width=1280, height=705, owner="java")
+    roi = (530, 206, 1042, 558)
+    window_frame = np.full((705, 1280), 255, dtype=np.uint8)
+
+    processor._camera.capture_bbox = lambda bbox, magnify=False: CursorImage(  # type: ignore[method-assign]
+        original=window_frame,
+        computer=window_frame,
+        black_pixel_count=0,
+    )
+
+    rod_calls: list[str] = []
+    line_calls: list[str] = []
+    processor._rod_detector.detect = lambda frame, window: rod_calls.append("rod") or True  # type: ignore[method-assign]
+    processor._line_detector.find_line = lambda frame: line_calls.append("line") or None  # type: ignore[method-assign]
+
+    result = processor(
+        VisionRequest(
+            epoch=1,
+            seq=1,
+            submitted_at=1.0,
+            minecraft_window=window,
+            fishing_roi=roi,
+            tracking_box=None,
+            detection_box=None,
+            is_fishing=False,
+            is_line_out=False,
+            mode="idle_preview",
+        )
+    )
+
+    assert rod_calls == []
+    assert line_calls == []
+    assert result.preview_state == "neutral"
+    assert result.rod_in_hand is False
+    assert result.line_candidate is None
+    assert result.line_pixels == 0
+    assert result.suggested_tracking_box == (88, 151, 168, 231)
+    assert result.suggested_detection_box == (106, 199, 150, 235)
+
+
 def _vision_request(*, seq: int, epoch: int = 1) -> VisionRequest:
     return VisionRequest(
         epoch=epoch,
@@ -126,4 +176,5 @@ def _vision_request(*, seq: int, epoch: int = 1) -> VisionRequest:
         detection_box=None,
         is_fishing=True,
         is_line_out=True,
+        mode="fishing",
     )

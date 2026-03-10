@@ -32,7 +32,7 @@ def test_calibrated_tracking_box_prefers_cursor_anchor_over_detected_line(monkey
     assert tracking_box == (88, 151, 168, 231)
 
 
-def test_default_detection_box_is_smaller_and_left_biased_below_cursor_anchor() -> None:
+def test_default_detection_box_is_centered_below_cursor_anchor() -> None:
     app = AutoFishTkApp()
     app._minecraft_window = WindowInfo(
         title="Minecraft",
@@ -47,7 +47,7 @@ def test_default_detection_box_is_smaller_and_left_biased_below_cursor_anchor() 
 
     detection_box = app._default_detection_box(frame)
 
-    assert detection_box == (104, 199, 148, 235)
+    assert detection_box == (106, 199, 150, 235)
 
 
 def test_build_tracking_preview_scores_detection_box_not_tracking_box() -> None:
