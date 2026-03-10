@@ -11,11 +11,13 @@ class TickProfile:
     detect_ms: float
     preview_ms: float
     record_ms: float
+    frame_interval_ms: float = 0.0
 
 
 @dataclass(frozen=True)
 class ProfileSummary:
     avg_total_ms: float
+    avg_frame_interval_ms: float
     avg_capture_ms: float
     avg_detect_ms: float
     avg_preview_ms: float
@@ -33,6 +35,7 @@ class RollingProfiler:
         if not self._profiles:
             return ProfileSummary(
                 avg_total_ms=0.0,
+                avg_frame_interval_ms=0.0,
                 avg_capture_ms=0.0,
                 avg_detect_ms=0.0,
                 avg_preview_ms=0.0,
@@ -40,8 +43,13 @@ class RollingProfiler:
             )
 
         count = float(len(self._profiles))
+        interval_values = [p.frame_interval_ms for p in self._profiles if p.frame_interval_ms > 0]
+        interval_count = float(len(interval_values))
         return ProfileSummary(
             avg_total_ms=sum(p.total_ms for p in self._profiles) / count,
+            avg_frame_interval_ms=(
+                sum(interval_values) / interval_count if interval_count > 0 else 0.0
+            ),
             avg_capture_ms=sum(p.capture_ms for p in self._profiles) / count,
             avg_detect_ms=sum(p.detect_ms for p in self._profiles) / count,
             avg_preview_ms=sum(p.preview_ms for p in self._profiles) / count,

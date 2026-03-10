@@ -140,7 +140,8 @@ def test_manual_action_reels_when_line_is_out(
     assert len(delayed_calls) == 1
     delay_ms, callback = delayed_calls[0]
     assert 300 <= delay_ms <= 1000
-    assert callback is app._cast
+    callback()
+    assert actions == ["reel", "cast"]
 
 
 def test_manual_action_reels_with_detector_hit_label_when_line_is_out(
@@ -175,7 +176,8 @@ def test_manual_action_reels_with_detector_hit_label_when_line_is_out(
     assert len(delayed_calls) == 1
     delay_ms, callback = delayed_calls[0]
     assert 300 <= delay_ms <= 1000
-    assert callback is app._cast
+    callback()
+    assert actions == ["reel", "cast"]
 
 
 def test_manual_action_casts_when_line_is_in(tmp_path: Path, monkeypatch) -> None:
@@ -228,7 +230,8 @@ def test_training_mark_and_reel_records_detector_hit(tmp_path: Path, monkeypatch
     assert len(delayed_calls) == 1
     delay_ms, callback = delayed_calls[0]
     assert 300 <= delay_ms <= 1000
-    assert callback is app._cast
+    callback()
+    assert actions == ["reel", "cast"]
 
 
 def test_manual_action_skips_trace_when_recording_disabled(monkeypatch) -> None:
@@ -371,12 +374,17 @@ def test_cast_increments_cast_counter(monkeypatch) -> None:
             callbacks.append((delay_ms, callback))
 
     app._root = FakeRoot()
+    app._is_fishing = True
     monkeypatch.setattr(app, "_use_rod", lambda: None)
 
     app._cast()
 
     assert app._cast_count == 1
-    assert callbacks == [(3000, app._mark_line_out)]
+    assert len(callbacks) == 1
+    delay_ms, callback = callbacks[0]
+    assert delay_ms == 3000
+    callback()
+    assert app._is_line_out is True
 
 
 def test_reel_and_recast_waits_before_cast(monkeypatch) -> None:
@@ -399,7 +407,8 @@ def test_reel_and_recast_waits_before_cast(monkeypatch) -> None:
     assert len(delayed_calls) == 1
     delay_ms, callback = delayed_calls[0]
     assert 300 <= delay_ms <= 1000
-    assert callback is app._cast
+    callback()
+    assert actions == ["reel", "cast"]
 
 
 def test_auto_bite_reel_increments_catch_counter() -> None:

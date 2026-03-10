@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from time import monotonic, sleep, time
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -184,10 +184,15 @@ class AutoFishTkApp:
         self._last_context_refresh_at = 0.0
         self._last_bite_indicator_at = 0.0
         self._last_vision_age_ms = 0.0
+        self._last_frame_applied_at: float | None = None
         self._vision_dropped_frames = 0
         self._record_queue_depth = 0
         self._record_dropped_frames = 0
         self._preview_state = "neutral"
+        self._blocking_ui = "none"
+        self._pause_menu_blocked = False
+        self._pause_menu_line_was_out = False
+        self._scheduled_action_generation = 0
 
         self._viewer: Any | None = None
         self._debug_viewer: Any | None = None
@@ -459,6 +464,7 @@ class AutoFishTkApp:
         self._vision_epoch += 1
         self._last_applied_vision_seq = 0
         self._last_vision_completed_at = None
+        self._last_frame_applied_at = None
         self._last_vision_age_ms = 0.0
         self._last_vision_submit_at = 0.0
 
@@ -484,6 +490,7 @@ class AutoFishTkApp:
         self._rod_in_hand = False
         self._line_watcher.reset()
         self._preview_state = "neutral"
+        self._reset_pause_menu_state()
 
     def _vision_mode(self) -> str:
         return "fishing" if self._is_fishing else "idle_preview"
@@ -496,9 +503,62 @@ class AutoFishTkApp:
     def _preview_border_color(self) -> str:
         if self._preview_state == "valid":
             return "#1f8f3a"
+        if self._preview_state == "paused":
+            return "#8a6f18"
         if self._preview_state == "invalid":
             return "#8c1d18"
         return "#68727c"
+
+    def _pause_menu_status_text(self) -> str:
+        return "Paused: Minecraft menu open; waiting"
+
+    def _reset_pause_menu_state(self) -> None:
+        self._blocking_ui = "none"
+        self._pause_menu_blocked = False
+        self._pause_menu_line_was_out = False
+
+    def _invalidate_scheduled_actions(self) -> None:
+        self._scheduled_action_generation += 1
+
+    def _schedule_action(self, delay_ms: int, callback: Callable[[], None]) -> None:
+        if self._root is None:
+            return
+        generation = self._scheduled_action_generation
+
+        def guarded() -> None:
+            if generation != self._scheduled_action_generation:
+                return
+            callback()
+
+        self._root.after(delay_ms, guarded)
+
+    def _enter_pause_menu_block(self) -> None:
+        if self._pause_menu_blocked:
+            return
+        self._blocking_ui = "pause_menu"
+        self._pause_menu_blocked = True
+        self._pause_menu_line_was_out = self._is_line_out
+        self._bite_detected = False
+        self._line_watcher.reset()
+        self._invalidate_scheduled_actions()
+        logger.info("Pause menu detected; waiting for it to clear")
+        if self._status_var is not None:
+            self._status_var.set(self._pause_menu_status_text())
+
+    def _resume_from_pause_menu(self) -> None:
+        if not self._pause_menu_blocked:
+            return
+        line_was_out = self._pause_menu_line_was_out
+        self._reset_pause_menu_state()
+        self._bite_detected = False
+        self._line_watcher.reset()
+        if not self._is_fishing:
+            return
+        logger.info("Pause menu cleared; resuming (line_was_out=%s)", line_was_out)
+        if line_was_out:
+            self._reel_and_recast(source="menu_resume")
+        else:
+            self._cast()
 
     def _should_write_profile_row(self) -> bool:
         return self._is_fishing or self._recording_enabled
@@ -655,7 +715,9 @@ class AutoFishTkApp:
         self._cast_count = 0
         self._last_bite_indicator_at = 0.0
         self._line_watcher.reset()
+        self._reset_pause_menu_state()
         self._reset_movement_state()
+        self._invalidate_scheduled_actions()
         self._invalidate_vision_epoch()
 
         if self._button is not None:
@@ -667,7 +729,7 @@ class AutoFishTkApp:
         if self._recording_enabled:
             self._append_trace_row(now=monotonic(), event="start")
         if delay_ms > 0:
-            self._root.after(delay_ms, self._cast_and_begin_tracking)
+            self._schedule_action(delay_ms, self._cast_and_begin_tracking)
         else:
             self._cast_and_begin_tracking()
 
@@ -681,7 +743,9 @@ class AutoFishTkApp:
         self._start_clock = None
         self._bite_detected = False
         self._line_watcher.reset()
+        self._reset_pause_menu_state()
         self._reset_movement_state()
+        self._invalidate_scheduled_actions()
         self._invalidate_vision_epoch()
 
         if not self._exiting:
@@ -724,7 +788,9 @@ class AutoFishTkApp:
         self._line_pixels = 0
         self._bite_detected = False
         self._preview_state = "neutral"
+        self._reset_pause_menu_state()
         self._line_watcher.reset()
+        self._invalidate_scheduled_actions()
         self._invalidate_vision_epoch()
         logger.info("Using Minecraft window '%s' at %s", window.title, window)
         logger.info("Fishing ROI set to %s", self._fishing_roi)
@@ -989,9 +1055,16 @@ class AutoFishTkApp:
             cv2.circle(annotated, self._line_candidate.center, radius=2, color=96, thickness=-1)
 
         border_state = preview_state or self._preview_state
-        if border_state not in {"neutral", "valid", "invalid"}:
+        if border_state not in {"neutral", "valid", "invalid", "paused"}:
             border_state = "valid" if self._main_preview_is_valid() else "invalid"
-        border_color = 128 if border_state == "neutral" else 96 if border_state == "valid" else 0
+        if border_state == "neutral":
+            border_color = 128
+        elif border_state == "valid":
+            border_color = 96
+        elif border_state == "paused":
+            border_color = 48
+        else:
+            border_color = 0
         height, width = annotated.shape[:2]
         cv2.rectangle(annotated, (0, 0), (width - 1, height - 1), color=border_color, thickness=2)
         return annotated
@@ -1163,6 +1236,10 @@ class AutoFishTkApp:
         return path
 
     def _manual_action(self) -> Path | None:
+        if self._pause_menu_blocked:
+            if self._status_var is not None:
+                self._status_var.set(self._pause_menu_status_text())
+            return None
         now = monotonic()
         path = None
         if self._is_fishing and self._is_line_out:
@@ -1190,6 +1267,10 @@ class AutoFishTkApp:
         return path
 
     def _training_mark_and_reel(self) -> Path | None:
+        if self._pause_menu_blocked:
+            if self._status_var is not None:
+                self._status_var.set(self._pause_menu_status_text())
+            return None
         now = monotonic()
         label = "hit" if self._bite_detected else "miss"
         path = None
@@ -1589,6 +1670,41 @@ class AutoFishTkApp:
         self._last_profile_log_at = now
         logger.info("PROFILE %s", self._profile_summary_text())
 
+    def _record_completed_frame_metrics(self, result: VisionResult, *, finished_at: float) -> None:
+        frame_total_ms = round((finished_at - result.submitted_at) * 1000, 1)
+        frame_interval_ms = 0.0
+        if self._last_frame_applied_at is not None:
+            frame_interval_ms = round((finished_at - self._last_frame_applied_at) * 1000, 1)
+        self._last_frame_applied_at = finished_at
+
+        self._profiler.add(
+            TickProfile(
+                total_ms=frame_total_ms,
+                frame_interval_ms=frame_interval_ms,
+                capture_ms=self._last_capture_duration_ms,
+                detect_ms=self._last_detect_duration_ms,
+                preview_ms=self._last_preview_duration_ms,
+                record_ms=self._last_record_duration_ms,
+            )
+        )
+        summary = self._profiler.summary()
+        self._last_tick_duration_ms = frame_total_ms
+        self._last_effective_fps = (
+            round((1000.0 / summary.avg_frame_interval_ms), 1)
+            if summary.avg_frame_interval_ms > 0
+            else 0.0
+        )
+        self._last_rss_mb = self._current_rss_mb()
+        if self._should_write_profile_row():
+            self._append_profile_row(
+                now=finished_at,
+                total_ms=frame_total_ms,
+                capture_ms=self._last_capture_duration_ms,
+                detect_ms=self._last_detect_duration_ms,
+                preview_ms=self._last_preview_duration_ms,
+                record_ms=self._last_record_duration_ms,
+            )
+
     def _capture_mark_clip(self, label: str, *, now: float) -> Path | None:
         if not self._recording_enabled:
             return None
@@ -1639,7 +1755,7 @@ class AutoFishTkApp:
         self._movement_state = MovementState()
 
     def _cast(self) -> None:
-        if self._root is None:
+        if self._root is None or self._pause_menu_blocked:
             return
 
         logger.info("Cast")
@@ -1656,9 +1772,11 @@ class AutoFishTkApp:
                 event="line_out_scheduled",
                 scheduled_delay_ms=cast_delay_ms,
             )
-        self._root.after(cast_delay_ms, self._mark_line_out)
+        self._schedule_action(cast_delay_ms, self._mark_line_out)
 
     def _mark_line_out(self) -> None:
+        if self._pause_menu_blocked:
+            return
         if self._is_fishing:
             self._is_line_out = True
             self._sync_line_state_indicator()
@@ -1666,6 +1784,8 @@ class AutoFishTkApp:
                 self._append_trace_row(now=monotonic(), event="line_out")
 
     def _reel(self, source: str = "system") -> None:
+        if self._pause_menu_blocked:
+            return
         logger.info("Reel")
         self._use_rod()
         self._is_line_out = False
@@ -1674,6 +1794,8 @@ class AutoFishTkApp:
             self._append_trace_row(now=monotonic(), event="reel", source=source)
 
     def _reel_and_recast(self, source: str = "system") -> None:
+        if self._pause_menu_blocked:
+            return
         self._reel(source=source)
         if self._root is None:
             self._cast()
@@ -1688,7 +1810,7 @@ class AutoFishTkApp:
                 source=source,
                 scheduled_delay_ms=recast_delay_ms,
             )
-        self._root.after(recast_delay_ms, self._cast)
+        self._schedule_action(recast_delay_ms, self._cast)
 
     def _choose_next_strafe_offset(self, current: int) -> int:
         if current >= AUTO_STRAFE_MAX_OFFSET_STEPS:
@@ -1889,6 +2011,9 @@ class AutoFishTkApp:
             self._consecutive_capture_failures += 1
             self._last_capture_error = result.capture_error
             self._preview_state = "invalid"
+            self._blocking_ui = "none"
+            self._last_preview_duration_ms = 0.0
+            self._record_completed_frame_metrics(result, finished_at=monotonic())
             if self._consecutive_capture_failures >= 3:
                 self._minecraft_window = None
                 self._fishing_roi = None
@@ -1905,20 +2030,29 @@ class AutoFishTkApp:
         self._line_pixels = result.line_pixels
         self._cursor_image = result.tracking_preview
         self._preview_state = result.preview_state
-        self._set_rod_in_hand(result.rod_in_hand)
+        self._blocking_ui = result.blocking_ui
 
         if self._tracking_box is None and result.suggested_tracking_box is not None:
             self._tracking_box = result.suggested_tracking_box
         if self._detection_box is None and result.suggested_detection_box is not None:
             self._detection_box = result.suggested_detection_box
 
-        previous_bite_detected = self._bite_detected
-        self._bite_detected = self._line_watcher.observe(
-            self._line_pixels,
-            active=self._is_fishing and self._is_line_out,
-        )
-        if self._bite_detected and not previous_bite_detected:
-            self._record_detection_event(event="bite_detected", source="vision")
+        resume_from_pause_menu = self._pause_menu_blocked and result.blocking_ui == "none"
+        if result.blocking_ui == "pause_menu":
+            self._enter_pause_menu_block()
+            self._bite_detected = False
+        else:
+            self._set_rod_in_hand(result.rod_in_hand)
+            if not resume_from_pause_menu:
+                previous_bite_detected = self._bite_detected
+                self._bite_detected = self._line_watcher.observe(
+                    self._line_pixels,
+                    active=self._is_fishing and self._is_line_out,
+                )
+                if self._bite_detected and not previous_bite_detected:
+                    self._record_detection_event(event="bite_detected", source="vision")
+            else:
+                self._bite_detected = False
 
         preview_start = monotonic()
         if self._viewer is not None:
@@ -1928,7 +2062,15 @@ class AutoFishTkApp:
                 result.tracking_preview.original,
                 result.tracking_preview.computer,
             )
-        self._last_preview_duration_ms = round((monotonic() - preview_start) * 1000, 1)
+        preview_finished_at = monotonic()
+        self._last_preview_duration_ms = round((preview_finished_at - preview_start) * 1000, 1)
+        self._record_completed_frame_metrics(result, finished_at=preview_finished_at)
+
+        if result.blocking_ui == "pause_menu":
+            return True
+        if resume_from_pause_menu:
+            self._resume_from_pause_menu()
+            return True
 
         if self._is_fish_on():
             self._catch_count += 1
@@ -1940,7 +2082,6 @@ class AutoFishTkApp:
         if self._root is None:
             return
 
-        start_time = monotonic()
         record_duration_ms = 0.0
         self._drain_recording_events()
         self._drain_vision_results()
@@ -1962,17 +2103,7 @@ class AutoFishTkApp:
             self._last_bite_indicator_at = monotonic()
             self._reel_and_recast(source="vision")
 
-        duration_ms = round((monotonic() - start_time) * 1000, 1)
-        if self._should_capture_preview() and self._should_write_profile_row():
-            self._append_profile_row(
-                now=monotonic(),
-                total_ms=duration_ms,
-                capture_ms=self._last_capture_duration_ms,
-                detect_ms=self._last_detect_duration_ms,
-                preview_ms=self._last_preview_duration_ms,
-                record_ms=record_duration_ms,
-            )
-
+        self._last_record_duration_ms = record_duration_ms
         if self._is_fishing:
             now = time()
             if self._start_clock is None:
@@ -1984,37 +2115,28 @@ class AutoFishTkApp:
                 self._tick_interval = (self._tick_interval + 1) % 23
                 self._current_clock = next_clock_position
 
-            self._profiler.add(
-                TickProfile(
-                    total_ms=duration_ms,
-                    capture_ms=self._last_capture_duration_ms,
-                    detect_ms=self._last_detect_duration_ms,
-                    preview_ms=self._last_preview_duration_ms,
-                    record_ms=record_duration_ms,
-                )
-            )
             summary = self._profiler.summary()
-            self._last_tick_duration_ms = duration_ms
-            self._last_record_duration_ms = record_duration_ms
             avg_ms = round(summary.avg_total_ms, 1)
             avg_capture_ms = round(summary.avg_capture_ms, 1)
             avg_detect_ms = round(summary.avg_detect_ms, 1)
             avg_preview_ms = round(summary.avg_preview_ms, 1)
             avg_record_ms = round(summary.avg_record_ms, 1)
-            self._last_effective_fps = round((1000.0 / avg_ms), 1) if avg_ms > 0 else 0.0
             self._last_rss_mb = self._current_rss_mb()
 
             elapsed_s = int(now - self._start_clock)
-            status = tracking_status_text(
-                line_pixels=self._cursor_image.black_pixel_count,
-                watcher=self._line_watcher,
-                is_line_out=self._is_line_out,
-                bite_detected=self._bite_detected,
-                elapsed_s=elapsed_s,
-                tick_interval=self._tick_interval,
-                duration_ms=duration_ms,
-                avg_ms=avg_ms,
-            )
+            if self._pause_menu_blocked:
+                status = self._pause_menu_status_text()
+            else:
+                status = tracking_status_text(
+                    line_pixels=self._cursor_image.black_pixel_count,
+                    watcher=self._line_watcher,
+                    is_line_out=self._is_line_out,
+                    bite_detected=self._bite_detected,
+                    elapsed_s=elapsed_s,
+                    tick_interval=self._tick_interval,
+                    duration_ms=self._last_tick_duration_ms,
+                    avg_ms=avg_ms,
+                )
             if self._status_var is not None:
                 self._status_var.set(status)
             if self._debug_var is not None:

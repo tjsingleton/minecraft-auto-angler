@@ -26,6 +26,7 @@ def test_cast_schedules_line_out_using_selected_runtime_delay(monkeypatch) -> No
             scheduled.append((delay_ms, callback))
 
     app._root = FakeRoot()
+    app._is_fishing = True
     monkeypatch.setattr(
         app,
         "_choose_delay_ms",
@@ -36,7 +37,11 @@ def test_cast_schedules_line_out_using_selected_runtime_delay(monkeypatch) -> No
     app._cast()
 
     assert chosen == [(2800, 3200)]
-    assert scheduled == [(3105, app._mark_line_out)]
+    assert len(scheduled) == 1
+    delay_ms, callback = scheduled[0]
+    assert delay_ms == 3105
+    callback()
+    assert app._is_line_out is True
 
 
 def test_reel_and_recast_uses_selected_runtime_delay(monkeypatch) -> None:
@@ -68,7 +73,11 @@ def test_reel_and_recast_uses_selected_runtime_delay(monkeypatch) -> None:
 
     assert chosen == [(350, 900)]
     assert actions == ["vision"]
-    assert scheduled == [(420, app._cast)]
+    assert len(scheduled) == 1
+    delay_ms, callback = scheduled[0]
+    assert delay_ms == 420
+    callback()
+    assert actions == ["vision", "cast"]
 
 
 def test_append_trace_row_writes_runtime_metadata_and_timing_fields(
@@ -191,7 +200,8 @@ def test_reel_and_recast_logs_auto_strafe_before_cast(monkeypatch) -> None:
 
     app._root = FakeRoot()
     monkeypatch.setattr(app, "_reel", lambda source="system": None)
-    monkeypatch.setattr(app, "_cast", lambda: None)
+    cast_calls: list[str] = []
+    monkeypatch.setattr(app, "_cast", lambda: cast_calls.append("cast"))
     monkeypatch.setattr(app, "_movement_state", app._movement_state.__class__())
     monkeypatch.setattr(
         app,
@@ -237,7 +247,11 @@ def test_reel_and_recast_logs_auto_strafe_before_cast(monkeypatch) -> None:
         and call["mouse_offset_x_px"] == 0
         for call in trace_calls
     )
-    assert scheduled == [(340, app._cast)]
+    assert len(scheduled) == 1
+    delay_ms, callback = scheduled[0]
+    assert delay_ms == 340
+    callback()
+    assert cast_calls == ["cast"]
 
 
 def test_maybe_auto_strafe_skips_when_disabled(monkeypatch) -> None:
@@ -621,13 +635,146 @@ def test_apply_vision_result_updates_state_on_main_thread(monkeypatch) -> None:
     assert events == ["detection", "vision"]
 
 
-def _vision_result(*, epoch: int, seq: int, line_pixels: int) -> VisionResult:
+def test_apply_vision_result_uses_completed_frame_metrics(monkeypatch) -> None:
+    app = AutoFishTkApp()
+    app._vision_epoch = 2
+    app._last_applied_vision_seq = 0
+    ticks = iter([1.30, 1.31, 1.34, 1.40, 1.41, 1.44])
+
+    monkeypatch.setattr("autoangler.gui_tk.monotonic", lambda: next(ticks))
+
+    first = _vision_result(epoch=2, seq=1, line_pixels=12, submitted_at=1.00, completed_at=1.25)
+    second = _vision_result(epoch=2, seq=2, line_pixels=9, submitted_at=1.10, completed_at=1.35)
+
+    assert app._apply_vision_result(first) is True
+    assert app._apply_vision_result(second) is True
+    assert app._last_tick_duration_ms == 340.0
+    assert app._last_effective_fps == 10.0
+
+
+def test_tick_does_not_change_frame_metrics_without_new_result() -> None:
+    app = AutoFishTkApp()
+    app._is_fishing = True
+    app._last_tick_duration_ms = 340.0
+    app._last_effective_fps = 10.0
+
+    class FakeRoot:
+        def after(self, _delay_ms: int, _callback) -> None:
+            return None
+
+    app._root = FakeRoot()
+    app._drain_recording_events = lambda: None  # type: ignore[method-assign]
+    app._drain_vision_results = lambda: None  # type: ignore[method-assign]
+    app._should_capture_preview = lambda: False  # type: ignore[method-assign]
+    app._drain_audio_hints = lambda *, now: None  # type: ignore[method-assign]
+
+    app._tick()
+
+    assert app._last_tick_duration_ms == 340.0
+    assert app._last_effective_fps == 10.0
+
+
+def test_menu_pause_resumes_with_reel_and_recast_when_line_was_out(monkeypatch) -> None:
+    app = AutoFishTkApp()
+    app._vision_epoch = 2
+    app._is_fishing = True
+    app._is_line_out = True
+    actions: list[str] = []
+
+    monkeypatch.setattr(app, "_reel_and_recast", lambda source="system": actions.append(source))
+    monkeypatch.setattr(app, "_cast", lambda: actions.append("cast"))
+
+    paused = _vision_result(
+        epoch=2,
+        seq=1,
+        line_pixels=0,
+        submitted_at=1.00,
+        completed_at=1.20,
+        preview_state="paused",
+        blocking_ui="pause_menu",
+    )
+    clear = _vision_result(
+        epoch=2,
+        seq=2,
+        line_pixels=0,
+        submitted_at=1.10,
+        completed_at=1.30,
+        preview_state="valid",
+        blocking_ui="none",
+    )
+
+    assert app._apply_vision_result(paused) is True
+    assert app._apply_vision_result(clear) is True
+    assert actions == ["menu_resume"]
+
+
+def test_menu_pause_resumes_with_cast_when_line_was_in(monkeypatch) -> None:
+    app = AutoFishTkApp()
+    app._vision_epoch = 2
+    app._is_fishing = True
+    app._is_line_out = False
+    actions: list[str] = []
+
+    monkeypatch.setattr(app, "_reel_and_recast", lambda source="system": actions.append(source))
+    monkeypatch.setattr(app, "_cast", lambda: actions.append("cast"))
+
+    paused = _vision_result(
+        epoch=2,
+        seq=1,
+        line_pixels=0,
+        submitted_at=1.00,
+        completed_at=1.20,
+        preview_state="paused",
+        blocking_ui="pause_menu",
+    )
+    clear = _vision_result(
+        epoch=2,
+        seq=2,
+        line_pixels=0,
+        submitted_at=1.10,
+        completed_at=1.30,
+        preview_state="valid",
+        blocking_ui="none",
+    )
+
+    assert app._apply_vision_result(paused) is True
+    assert app._apply_vision_result(clear) is True
+    assert actions == ["cast"]
+
+
+def test_menu_pause_blocks_line_out_callback_until_resume() -> None:
+    app = AutoFishTkApp()
+    app._is_fishing = True
+    app._is_line_out = False
+
+    app._mark_line_out()
+    assert app._is_line_out is True
+
+    app._is_line_out = False
+    app._pause_menu_blocked = True
+
+    app._mark_line_out()
+
+    assert app._is_line_out is False
+
+
+def _vision_result(
+    *,
+    epoch: int,
+    seq: int,
+    line_pixels: int,
+    submitted_at: float = 1.0,
+    completed_at: float = 1.25,
+    preview_state: str = "invalid",
+    blocking_ui: str = "none",
+) -> VisionResult:
     original = np.full((6, 6), 255, dtype=np.uint8)
     computer = np.full((6, 6), 255, dtype=np.uint8)
     return VisionResult(
         epoch=epoch,
         seq=seq,
-        completed_at=1.25,
+        submitted_at=submitted_at,
+        completed_at=completed_at,
         window_frame=original,
         main_preview_frame=original,
         tracking_preview=CursorImage(
@@ -636,7 +783,8 @@ def _vision_result(*, epoch: int, seq: int, line_pixels: int) -> VisionResult:
             black_pixel_count=line_pixels,
         ),
         debug_composite=np.zeros((6, 12, 3), dtype=np.uint8),
-        preview_state="invalid",
+        preview_state=preview_state,
+        blocking_ui=blocking_ui,
         rod_in_hand=False,
         line_candidate=None,
         line_pixels=line_pixels,

@@ -16,3 +16,8 @@ def test_rod_template_is_packaged() -> None:
 def test_cod_icon_is_packaged() -> None:
     path = resources.files("autoangler.assets").joinpath("Cod.gif")
     assert path.is_file()
+
+
+def test_pause_menu_template_is_packaged() -> None:
+    path = resources.files("autoangler.assets").joinpath("pause_menu_options_template.png")
+    assert path.is_file()

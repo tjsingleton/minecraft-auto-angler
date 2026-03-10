@@ -299,10 +299,16 @@ def test_button_start_waits_five_seconds_before_tracking() -> None:
     app._button = FakeButton()
     app._status_var = FakeVar()
     app._ensure_tracking_context = lambda: True  # type: ignore[method-assign]
+    triggered: list[str] = []
+    app._cast_and_begin_tracking = lambda: triggered.append("run")  # type: ignore[method-assign]
 
     app._start()
 
-    assert calls == [(5000, app._cast_and_begin_tracking)]
+    assert len(calls) == 1
+    delay_ms, callback = calls[0]
+    assert delay_ms == 5000
+    callback()
+    assert triggered == ["run"]
     assert app._button.text == "Stop Fishing"
     assert app._status_var.value == "Starting in 5s... focus Minecraft"
 

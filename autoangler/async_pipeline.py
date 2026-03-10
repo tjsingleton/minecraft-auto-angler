@@ -17,6 +17,7 @@ from autoangler.cursor_image import CursorImage
 from autoangler.line_detector import FishingLineDetector, LineCandidate, centered_tracking_box
 from autoangler.logging_utils import build_session_video_path
 from autoangler.minecraft_window import WindowInfo
+from autoangler.pause_menu_detector import PauseMenuDetector
 from autoangler.rod_detector import RodDetector
 from autoangler.roi import cursor_anchor_in_roi, window_relative_box
 from autoangler.session_recorder import SessionRecorder
@@ -42,12 +43,14 @@ class VisionRequest:
 class VisionResult:
     epoch: int
     seq: int
+    submitted_at: float
     completed_at: float
     window_frame: np.ndarray
     main_preview_frame: np.ndarray
     tracking_preview: CursorImage
     debug_composite: np.ndarray
-    preview_state: Literal["neutral", "valid", "invalid"]
+    preview_state: Literal["neutral", "valid", "invalid", "paused"]
+    blocking_ui: Literal["none", "pause_menu"]
     rod_in_hand: bool
     line_candidate: LineCandidate | None
     line_pixels: int
@@ -331,6 +334,7 @@ class VisionProcessor:
         capture_backend = create_capture_backend()
         self._camera = CursorCamera(magnification=10, capture_backend=capture_backend)
         self._line_detector = FishingLineDetector()
+        self._pause_menu_detector = PauseMenuDetector()
         self._rod_detector = RodDetector()
 
     def __call__(self, request: VisionRequest) -> VisionResult:
@@ -341,18 +345,20 @@ class VisionProcessor:
             status_lines=["status:waiting", "track:None detect:None", "line_px:0"],
         )
         if request.minecraft_window is None or request.fishing_roi is None:
-            preview_state: Literal["neutral", "valid", "invalid"] = (
+            preview_state: Literal["neutral", "valid", "invalid", "paused"] = (
                 "neutral" if request.mode == "idle_preview" else "invalid"
             )
             return VisionResult(
                 epoch=request.epoch,
                 seq=request.seq,
+                submitted_at=request.submitted_at,
                 completed_at=monotonic(),
                 window_frame=blank.original,
                 main_preview_frame=blank.original,
                 tracking_preview=blank,
                 debug_composite=empty_debug,
                 preview_state=preview_state,
+                blocking_ui="none",
                 rod_in_hand=False,
                 line_candidate=None,
                 line_pixels=0,
@@ -378,12 +384,14 @@ class VisionProcessor:
             return VisionResult(
                 epoch=request.epoch,
                 seq=request.seq,
+                submitted_at=request.submitted_at,
                 completed_at=monotonic(),
                 window_frame=blank.original,
                 main_preview_frame=blank.original,
                 tracking_preview=blank,
                 debug_composite=empty_debug,
                 preview_state="invalid",
+                blocking_ui="none",
                 rod_in_hand=False,
                 line_candidate=None,
                 line_pixels=0,
@@ -421,9 +429,22 @@ class VisionProcessor:
             line_candidate = None
             processed_tracking = _crop_box(roi_frame, detection_box).copy()
             line_pixels = 0
-            preview_state: Literal["neutral", "valid", "invalid"] = "neutral"
+            preview_state: Literal["neutral", "valid", "invalid", "paused"] = "neutral"
+            blocking_ui: Literal["none", "pause_menu"] = "none"
             status_lines = [
                 "mode:idle_preview",
+                f"track:{tracking_box} detect:{detection_box}",
+                "candidate:-",
+            ]
+        elif self._pause_menu_detector.detect(window_frame):
+            rod_in_hand = False
+            line_candidate = None
+            processed_tracking = _crop_box(roi_frame, detection_box).copy()
+            line_pixels = 0
+            preview_state = "paused"
+            blocking_ui = "pause_menu"
+            status_lines = [
+                "mode:paused menu:pause",
                 f"track:{tracking_box} detect:{detection_box}",
                 "candidate:-",
             ]
@@ -436,6 +457,7 @@ class VisionProcessor:
             line_pixels = int(np.sum(processed_tracking == 0))
             preview_valid = (line_pixels > 0) if request.is_line_out else rod_in_hand
             preview_state = "valid" if preview_valid else "invalid"
+            blocking_ui = "none"
             status_lines = [
                 f"rod:{int(rod_in_hand)} line_px:{line_pixels}",
                 f"track:{tracking_box} detect:{detection_box}",
@@ -471,12 +493,14 @@ class VisionProcessor:
         return VisionResult(
             epoch=request.epoch,
             seq=request.seq,
+            submitted_at=request.submitted_at,
             completed_at=monotonic(),
             window_frame=window_frame.copy(),
             main_preview_frame=main_preview_frame,
             tracking_preview=tracking_preview,
             debug_composite=debug_composite,
             preview_state=preview_state,
+            blocking_ui=blocking_ui,
             rod_in_hand=rod_in_hand,
             line_candidate=line_candidate,
             line_pixels=line_pixels,
@@ -642,7 +666,7 @@ def _build_main_preview_frame(
     tracking_box: tuple[int, int, int, int],
     detection_box: tuple[int, int, int, int],
     line_candidate: LineCandidate | None,
-    preview_state: Literal["neutral", "valid", "invalid"],
+    preview_state: Literal["neutral", "valid", "invalid", "paused"],
 ) -> np.ndarray:
     annotated = roi_frame.copy()
     x1, y1, x2, y2 = tracking_box
@@ -656,7 +680,14 @@ def _build_main_preview_frame(
         cv2.rectangle(annotated, (lx1, ly1), (lx2, ly2), color=96, thickness=1)
         cv2.circle(annotated, line_candidate.center, radius=2, color=96, thickness=-1)
 
-    border_color = 128 if preview_state == "neutral" else 96 if preview_state == "valid" else 0
+    if preview_state == "neutral":
+        border_color = 128
+    elif preview_state == "valid":
+        border_color = 96
+    elif preview_state == "paused":
+        border_color = 48
+    else:
+        border_color = 0
     height, width = annotated.shape[:2]
     cv2.rectangle(annotated, (0, 0), (width - 1, height - 1), color=border_color, thickness=2)
     return annotated
