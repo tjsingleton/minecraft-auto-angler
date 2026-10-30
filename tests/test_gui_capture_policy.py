@@ -20,4 +20,3 @@ def test_should_capture_preview_is_true_with_window_context() -> None:
     app._minecraft_window = WindowInfo(title="Minecraft", left=0, top=0, width=1000, height=700)
     app._fishing_roi = (100, 100, 400, 300)
     assert app._should_capture_preview() is True
-

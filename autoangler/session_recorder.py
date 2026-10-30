@@ -150,9 +150,7 @@ class SessionRecorder:
         return writer
 
     @staticmethod
-    def _normalize_video_frame(
-        frame: np.ndarray, size: tuple[int, int] | None
-    ) -> np.ndarray:
+    def _normalize_video_frame(frame: np.ndarray, size: tuple[int, int] | None) -> np.ndarray:
         if size is None:
             target = frame
         else:

@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.13.6"
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --group dev
+      - name: Reject tracked macOS metadata
+        run: test -z "$(git ls-files -- .DS_Store ':(glob)**/.DS_Store')"
+      - run: make lint format-check
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install Linux display and native prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth python3-tk libgl1 libglib2.0-0
+      - run: uv sync --locked --group dev
+      - name: Verify Tk availability
+        run: uv run --locked python -c "import tkinter; print(tkinter.TkVersion)"
+      - name: Test on Linux with a virtual display
+        if: runner.os == 'Linux'
+        run: xvfb-run -a make test
+      - name: Test on macOS
+        if: runner.os == 'macOS'
+        run: make test
+      - run: make build
+      - name: Verify installed wheel on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a uv run --locked python scripts/smoke_wheel.py dist/*.whl
+      - name: Verify installed wheel on macOS
+        if: runner.os == 'macOS'
+        run: uv run --locked python scripts/smoke_wheel.py dist/*.whl
+      - name: Compile optional audio helper without capturing audio
+        if: runner.os == 'macOS'
+        run: swiftc -O autoangler/macos_minecraft_audio_capture.swift -o "$RUNNER_TEMP/macos_minecraft_audio_capture"

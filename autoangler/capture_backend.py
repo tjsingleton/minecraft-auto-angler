@@ -34,7 +34,7 @@ class MSSCaptureBackend:
     def __init__(self) -> None:
         import mss
 
-        self._mss = mss.mss()
+        self._mss = mss.MSS()
 
     def grab(self, bbox: CaptureBBox | None = None) -> np.ndarray:
         if bbox is None:

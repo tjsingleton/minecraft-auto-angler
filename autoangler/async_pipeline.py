@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from queue import SimpleQueue
 from time import monotonic
-from typing import Callable, Literal
+from typing import Literal
 
 import cv2
 import numpy as np

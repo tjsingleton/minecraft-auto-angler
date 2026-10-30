@@ -126,7 +126,9 @@ def test_vision_worker_overwrites_pending_request_with_newest() -> None:
     assert worker.dropped_frames == 1
 
 
-def test_vision_processor_idle_preview_skips_expensive_detectors_and_returns_neutral_state() -> None:
+def test_vision_processor_idle_preview_skips_expensive_detectors_and_returns_neutral_state() -> (
+    None
+):
     processor = VisionProcessor()
     window = WindowInfo(title="Minecraft", left=18, top=30, width=1280, height=705, owner="java")
     roi = (530, 206, 1042, 558)

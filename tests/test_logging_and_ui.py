@@ -28,9 +28,7 @@ from autoangler.logging_utils import (
 
 def test_build_session_log_path_uses_timestamped_session_name(tmp_path: Path) -> None:
     path = build_session_log_path(tmp_path, "20260307-160455")
-    assert path == (
-        tmp_path / "sessions" / "20260307-160455" / "20260307-160455.log"
-    )
+    assert path == (tmp_path / "sessions" / "20260307-160455" / "20260307-160455.log")
 
 
 def test_build_session_log_path_uses_log_extension(tmp_path: Path) -> None:
@@ -43,9 +41,7 @@ def test_build_session_profile_path_uses_session_directory(tmp_path: Path) -> No
 
     path = build_session_profile_path(log_path)
 
-    assert path == (
-        tmp_path / "sessions" / "20260308-010000" / "20260308-010000-profile.csv"
-    )
+    assert path == (tmp_path / "sessions" / "20260308-010000" / "20260308-010000-profile.csv")
 
 
 def test_build_session_capture_path_uses_session_log_stem(tmp_path: Path) -> None:
@@ -53,9 +49,7 @@ def test_build_session_capture_path_uses_session_log_stem(tmp_path: Path) -> Non
 
     path = build_session_capture_path(log_path, "manual")
 
-    assert path == (
-        tmp_path / "sessions" / "20260307-211730" / "20260307-211730-manual.png"
-    )
+    assert path == (tmp_path / "sessions" / "20260307-211730" / "20260307-211730-manual.png")
 
 
 def test_logging_utils_exposes_video_and_mark_path_builders() -> None:
@@ -139,9 +133,7 @@ def test_tracking_status_text_shows_weak_frame_progress_and_bite_state() -> None
     assert "bite:0" in text
 
 
-def test_maybe_save_debug_screenshot_writes_file_in_debug_mode(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_maybe_save_debug_screenshot_writes_file_in_debug_mode(tmp_path: Path, monkeypatch) -> None:
     app = AutoFishTkApp()
     log_path = tmp_path / "sessions" / "20260307-211730.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -159,9 +151,7 @@ def test_maybe_save_debug_screenshot_writes_file_in_debug_mode(
     assert path.exists()
 
 
-def test_maybe_save_debug_screenshot_skips_when_not_debug_mode(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_maybe_save_debug_screenshot_skips_when_not_debug_mode(tmp_path: Path, monkeypatch) -> None:
     app = AutoFishTkApp()
     log_path = tmp_path / "sessions" / "20260307-211730.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -252,9 +242,7 @@ def test_toggle_recording_closes_recording_worker_when_disabling() -> None:
     assert app._recording_worker is None
 
 
-def test_open_session_folder_uses_active_session_directory(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_open_session_folder_uses_active_session_directory(tmp_path: Path, monkeypatch) -> None:
     app = AutoFishTkApp()
     log_path = tmp_path / "sessions" / "20260307-211730.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
