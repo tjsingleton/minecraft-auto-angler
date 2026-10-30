@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from time import monotonic, sleep
+from time import monotonic
 
 import cv2
 import numpy as np
@@ -34,6 +34,7 @@ def test_recording_worker_saves_screenshot_and_emits_event(tmp_path: Path) -> No
 
 
 def test_recording_worker_drops_oldest_frame_when_queue_is_full(tmp_path: Path) -> None:
+    started = threading.Event()
     release = threading.Event()
     recorded: list[float] = []
 
@@ -47,6 +48,7 @@ def test_recording_worker_drops_oldest_frame_when_queue_is_full(tmp_path: Path) 
         def record_frame(self, *, now: float, raw_window_frame, debug_frame) -> None:
             recorded.append(now)
             if now == 1.0:
+                started.set()
                 release.wait(timeout=2)
 
         def mark(self, label: str, *, now: float) -> Path:
@@ -66,11 +68,13 @@ def test_recording_worker_drops_oldest_frame_when_queue_is_full(tmp_path: Path) 
     frame = np.zeros((4, 4), dtype=np.uint8)
 
     worker.enqueue_frame(now=1.0, raw_window_frame=frame, debug_frame=frame)
-    sleep(0.05)
-    worker.enqueue_frame(now=2.0, raw_window_frame=frame, debug_frame=frame)
-    worker.enqueue_frame(now=3.0, raw_window_frame=frame, debug_frame=frame)
-    release.set()
-    worker.close()
+    try:
+        assert started.wait(timeout=2)
+        worker.enqueue_frame(now=2.0, raw_window_frame=frame, debug_frame=frame)
+        worker.enqueue_frame(now=3.0, raw_window_frame=frame, debug_frame=frame)
+    finally:
+        release.set()
+        worker.close()
 
     events = worker.poll_events()
 
