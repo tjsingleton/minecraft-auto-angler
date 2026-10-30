@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -34,7 +33,7 @@ class ScreenBounds:
         return self.left <= x < self.right and self.top <= y < self.bottom
 
 
-def get_virtual_screen_bounds() -> Optional[ScreenBounds]:
+def get_virtual_screen_bounds() -> ScreenBounds | None:
     """
     Best-effort detection of the virtual screen bounds.
 

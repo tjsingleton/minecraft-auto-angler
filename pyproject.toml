@@ -1,15 +1,15 @@
 [project]
 name = "minecraft-auto-angler"
 version = "0.1.0"
-description = "A toy project to automate fishing in Minecraft."
-requires-python = ">=3.10"
+description = "Minecraft fishing automation and session analysis."
+requires-python = ">=3.13,<3.14"
 dependencies = [
-    "opencv-python~=4.7.0.68",
-    "numpy>=1.26.0,<2.0",
-    "pyautogui~=0.9.53",
-    "Pillow~=9.4.0",
-    "pynput~=1.7.6",
-    "mss",
+    "opencv-python>=5.0.0.93,<6",
+    "numpy>=2.5.4,<3",
+    "pyautogui>=0.9.54,<1",
+    "Pillow>=13.0.0,<14",
+    "pynput>=1.8.2,<2",
+    "mss>=10.2.0,<11",
 ]
 
 [project.scripts]
@@ -17,25 +17,33 @@ autoangler = "autoangler.__main__:main"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
-    "ruff>=0.6",
+    "pytest>=9.2.0,<10",
+    "ruff>=0.17.3,<0.18",
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.33,<2"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build]
-include = [
-    "autoangler/**",
-]
+exclude = ["autoangler/macos_minecraft_audio_capture", "**/.DS_Store", "**/__pycache__/**"]
+
+[tool.hatch.build.targets.sdist]
+include = ["autoangler/", "auto-angler/*.py", "tests/", "scripts/", "docs/", "Makefile", "AGENTS.md", ".python-version", "uv.lock"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["autoangler"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py313"
 line-length = 100
+extend-exclude = ["docs/plans"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I"]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.uv]
+required-version = "==0.13.6"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

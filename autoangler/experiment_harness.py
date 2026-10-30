@@ -4,7 +4,7 @@ import argparse
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import cv2
@@ -87,7 +87,7 @@ def parse_session_log(log_path: Path) -> SessionLogData:
             continue
 
         wall_time = datetime.strptime(match.group("timestamp"), TIMESTAMP_FORMAT).replace(
-            tzinfo=timezone.utc
+            tzinfo=UTC
         )
         message = match.group("message")
 
@@ -188,7 +188,7 @@ def run_experiment(
     result: dict[str, object] = {
         "@context": EXPERIMENT_CONTEXT,
         "@type": "ExperimentRun",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "sessionLog": session_log.as_uri(),
         "sessionTrace": session_trace.resolve().as_uri() if session_trace is not None else None,
         "trackingBox": list(tracking_box),
@@ -236,7 +236,7 @@ def run_capture_benchmark(
     result: dict[str, object] = {
         "@context": EXPERIMENT_CONTEXT,
         "@type": "CaptureBackendRun",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "backend": backend_name,
         "sessionLog": session_log.as_uri(),
         "sessionProfile": session_profile.as_uri(),
@@ -396,11 +396,7 @@ def _evaluate_marks(
         window_start = nearest_index - pre_frames
         window_end = nearest_index + post_frames
         matched = next(
-            (
-                index
-                for index in unmatched_detections
-                if window_start <= index <= window_end
-            ),
+            (index for index in unmatched_detections if window_start <= index <= window_end),
             None,
         )
         if matched is not None:

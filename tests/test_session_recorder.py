@@ -14,9 +14,7 @@ def _load_session_recorder_module():
         pytest.fail(f"autoangler.session_recorder is missing: {exc}")
 
 
-def test_session_recorder_writes_window_and_debug_videos(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_session_recorder_writes_window_and_debug_videos(tmp_path: Path, monkeypatch) -> None:
     module = _load_session_recorder_module()
     SessionRecorder = getattr(module, "SessionRecorder", None)
     assert SessionRecorder is not None
@@ -68,9 +66,7 @@ def test_session_recorder_writes_window_and_debug_videos(
     ]
 
 
-def test_session_recorder_saves_mark_clip_series(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_session_recorder_saves_mark_clip_series(tmp_path: Path, monkeypatch) -> None:
     module = _load_session_recorder_module()
     SessionRecorder = getattr(module, "SessionRecorder", None)
     assert SessionRecorder is not None
@@ -113,9 +109,7 @@ def test_session_recorder_saves_mark_clip_series(
     )
     recorder.close()
 
-    assert clip_dir == (
-        tmp_path / "sessions" / "20260308-010000" / "20260308-010000-mark-00"
-    )
+    assert clip_dir == (tmp_path / "sessions" / "20260308-010000" / "20260308-010000-mark-00")
     assert clip_dir.exists()
     assert sorted(path.name for path in clip_dir.glob("*.png")) == [
         "frame-000-debug.png",

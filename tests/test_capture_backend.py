@@ -83,7 +83,7 @@ def test_mss_backend_converts_bgra_to_rgb(monkeypatch) -> None:
     fake_mss_module = type(
         "FakeMSSModule",
         (),
-        {"mss": lambda: fake_context},
+        {"MSS": lambda: fake_context},
     )
     monkeypatch.setitem(sys.modules, "mss", fake_mss_module)
 

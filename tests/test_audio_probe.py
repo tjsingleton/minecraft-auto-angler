@@ -38,21 +38,17 @@ def test_audio_splash_detector_triggers_after_strong_onset() -> None:
     )
 
     assert (
-        detector.observe(AudioStats(timestamp=0.0, rms=0.02, peak=0.04, frame_count=1024))
-        is False
+        detector.observe(AudioStats(timestamp=0.0, rms=0.02, peak=0.04, frame_count=1024)) is False
     )
     assert (
-        detector.observe(AudioStats(timestamp=0.1, rms=0.025, peak=0.05, frame_count=1024))
-        is False
+        detector.observe(AudioStats(timestamp=0.1, rms=0.025, peak=0.05, frame_count=1024)) is False
     )
     assert (
-        detector.observe(AudioStats(timestamp=0.2, rms=0.03, peak=0.06, frame_count=1024))
-        is False
+        detector.observe(AudioStats(timestamp=0.2, rms=0.03, peak=0.06, frame_count=1024)) is False
     )
 
     assert (
-        detector.observe(AudioStats(timestamp=0.3, rms=0.09, peak=0.24, frame_count=1024))
-        is True
+        detector.observe(AudioStats(timestamp=0.3, rms=0.09, peak=0.24, frame_count=1024)) is True
     )
 
 
@@ -65,24 +61,19 @@ def test_audio_splash_detector_respects_cooldown() -> None:
     )
 
     assert (
-        detector.observe(AudioStats(timestamp=0.0, rms=0.03, peak=0.05, frame_count=1024))
-        is False
+        detector.observe(AudioStats(timestamp=0.0, rms=0.03, peak=0.05, frame_count=1024)) is False
     )
     assert (
-        detector.observe(AudioStats(timestamp=0.1, rms=0.03, peak=0.05, frame_count=1024))
-        is False
+        detector.observe(AudioStats(timestamp=0.1, rms=0.03, peak=0.05, frame_count=1024)) is False
     )
     assert (
-        detector.observe(AudioStats(timestamp=0.2, rms=0.08, peak=0.22, frame_count=1024))
-        is True
+        detector.observe(AudioStats(timestamp=0.2, rms=0.08, peak=0.22, frame_count=1024)) is True
     )
     assert (
-        detector.observe(AudioStats(timestamp=0.5, rms=0.09, peak=0.25, frame_count=1024))
-        is False
+        detector.observe(AudioStats(timestamp=0.5, rms=0.09, peak=0.25, frame_count=1024)) is False
     )
     assert (
-        detector.observe(AudioStats(timestamp=1.3, rms=0.09, peak=0.25, frame_count=1024))
-        is True
+        detector.observe(AudioStats(timestamp=1.3, rms=0.09, peak=0.25, frame_count=1024)) is True
     )
 
 

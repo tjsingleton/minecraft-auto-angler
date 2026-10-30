@@ -26,9 +26,7 @@ class RuntimeConfig:
     cast_settle: DelayRange = field(
         default_factory=lambda: DelayRange(minimum_ms=3000, maximum_ms=3000)
     )
-    recast: DelayRange = field(
-        default_factory=lambda: DelayRange(minimum_ms=300, maximum_ms=1000)
-    )
+    recast: DelayRange = field(default_factory=lambda: DelayRange(minimum_ms=300, maximum_ms=1000))
     audio_hints_enabled: bool = False
     auto_strafe_enabled: bool = True
 

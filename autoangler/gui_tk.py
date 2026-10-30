@@ -7,12 +7,13 @@ import random
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from csv import DictWriter
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from time import monotonic, sleep, time
-from typing import Any, Callable
+from typing import Any
 
 import cv2
 import numpy as np
@@ -956,9 +957,7 @@ class AutoFishTkApp:
         x1, y1, x2, y2 = tracking_box
         return tracking_box, frame[y1:y2, x1:x2]
 
-    def _detection_frame(
-        self, frame: np.ndarray
-    ) -> tuple[tuple[int, int, int, int], np.ndarray]:
+    def _detection_frame(self, frame: np.ndarray) -> tuple[tuple[int, int, int, int], np.ndarray]:
         detection_box = self._detection_box
         if detection_box is None:
             detection_box = self._default_detection_box(frame)
@@ -1395,9 +1394,7 @@ class AutoFishTkApp:
                     "audio_hints_enabled": metadata["audio_hints_enabled"],
                     "auto_strafe_enabled": int(self._auto_strafe_enabled),
                     "scheduled_delay_ms": "" if scheduled_delay_ms is None else scheduled_delay_ms,
-                    "audio_hint_rms": (
-                        "" if audio_hint_rms is None else f"{audio_hint_rms:.4f}"
-                    ),
+                    "audio_hint_rms": ("" if audio_hint_rms is None else f"{audio_hint_rms:.4f}"),
                     "audio_hint_peak": (
                         "" if audio_hint_peak is None else f"{audio_hint_peak:.4f}"
                     ),
@@ -1410,12 +1407,8 @@ class AutoFishTkApp:
                     ),
                     "mouse_dx_px": "" if mouse_dx_px is None else mouse_dx_px,
                     "mouse_dy_px": "" if mouse_dy_px is None else mouse_dy_px,
-                    "mouse_offset_x_px": (
-                        "" if mouse_offset_x_px is None else mouse_offset_x_px
-                    ),
-                    "mouse_offset_y_px": (
-                        "" if mouse_offset_y_px is None else mouse_offset_y_px
-                    ),
+                    "mouse_offset_x_px": ("" if mouse_offset_x_px is None else mouse_offset_x_px),
+                    "mouse_offset_y_px": ("" if mouse_offset_y_px is None else mouse_offset_y_px),
                     "source": source,
                     "training_label": training_label,
                     "rod_in_hand": int(self._rod_in_hand),
@@ -1550,10 +1543,7 @@ class AutoFishTkApp:
         if not self._recording_enabled or not self._is_fishing:
             return None
 
-        if (
-            self._latest_window_frame is not None
-            and self._latest_debug_composite is not None
-        ):
+        if self._latest_window_frame is not None and self._latest_debug_composite is not None:
             self._ensure_recording_worker().enqueue_frame(
                 now=now,
                 raw_window_frame=self._latest_window_frame,
@@ -1868,9 +1858,7 @@ class AutoFishTkApp:
             return total_delay_ms
 
         movement = self._movement_state
-        target_strafe_offset = self._choose_next_strafe_offset(
-            movement.current_strafe_offset_steps
-        )
+        target_strafe_offset = self._choose_next_strafe_offset(movement.current_strafe_offset_steps)
         strafe_delta_steps = target_strafe_offset - movement.current_strafe_offset_steps
         requested_strafe_duration_ms = abs(strafe_delta_steps) * AUTO_STRAFE_STEP_MS
         strafe_duration_ms = min(total_delay_ms, requested_strafe_duration_ms)

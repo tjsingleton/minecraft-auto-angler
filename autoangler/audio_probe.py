@@ -10,9 +10,10 @@ import subprocess
 import sys
 import threading
 from collections import deque
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, TextIO
+from typing import TextIO
 
 logger = logging.getLogger(__name__)
 BITE_CANDIDATE_PATTERN = re.compile(

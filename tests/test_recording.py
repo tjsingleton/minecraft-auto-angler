@@ -108,9 +108,7 @@ def test_mark_bite_appends_mark_event(tmp_path: Path, monkeypatch) -> None:
     assert ",manual,,0,0" in path.read_text()
 
 
-def test_manual_action_reels_when_line_is_out(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_manual_action_reels_when_line_is_out(tmp_path: Path, monkeypatch) -> None:
     app = AutoFishTkApp()
     log_path = tmp_path / "sessions" / "20260307-213938.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -22,17 +22,17 @@ Why?
 
 ## Setup and run
 
-Install [uv](https://docs.astral.sh/uv/) (e.g. `curl -LsSf https://astral.sh/uv/install.sh | sh`), then from the repo root:
+Install [uv](https://docs.astral.sh/uv/) **0.13.6** and use Python **3.13**. For a standalone uv installation, run `uv self update 0.13.6`. The committed `.python-version` selects Python 3.13; uv downloads it if needed. From the repo root:
 
 ```bash
-uv sync
-uv run python -m autoangler
+uv sync --locked --group dev
+uv run --locked python -m autoangler
 ```
 
 Example run with explicit timing ranges and audio hints:
 
 ```bash
-uv run python -m autoangler \
+uv run --locked python -m autoangler \
   --cast-settle-min-ms 2800 \
   --cast-settle-max-ms 3200 \
   --recast-min-ms 300 \
@@ -40,17 +40,40 @@ uv run python -m autoangler \
   --audio-hints
 ```
 
-Optional (recommended for contributors):
+Contributor commands:
 
 ```bash
-uv sync --group dev
+make setup          # locked runtime and development dependencies
+make check          # lint, formatting check, and pytest
+make format         # apply Ruff fixes and formatting, then inspect the diff
+make build          # wheel and source distribution
+uv run --locked python scripts/smoke_wheel.py dist/*.whl
 ```
+
+`pyproject.toml` and `uv.lock` are the dependency sources of truth. To update dependencies,
+edit constraints with uv 0.13.6, run `uv lock --upgrade`, then rerun the checks above.
+Python updates must pass both macOS and Linux CI before expanding the supported range.
+GitHub Actions dependencies receive weekly Dependabot PRs.
+
+Verify Tk without opening a window:
+
+```bash
+uv run --locked python -c 'import tkinter; print(tkinter.TkVersion)'
+```
+
+See [architecture](docs/architecture.md), [automated and live validation](docs/validation.md),
+and [agent instructions](AGENTS.md). On headless Linux, tests and installed-wheel checks
+run under `xvfb-run -a`; live desktop capability checks remain opt-in.
 
 Experimental macOS audio probe:
 
 ```bash
-uv run python -m autoangler.audio_probe --title-hint Minecraft
+uv run --locked python -m autoangler.audio_probe --title-hint Minecraft
 ```
+
+Install Xcode Command Line Tools with `xcode-select --install` for the optional audio helper.
+The helper compiles from Swift source on macOS; no architecture-specific executable is shipped
+in the wheel or source distribution.
 
 This probe uses ScreenCaptureKit to target Minecraft app audio and prints `BITE_CANDIDATE` lines when
 it sees a strong transient that looks like a fishing splash. It is macOS-only. When you launch the Tk
@@ -60,7 +83,7 @@ alongside the vision detector for the same session.
 Legacy launcher (kept for backward compatibility):
 
 ```bash
-cd auto-angler && uv run python auto-angler.py
+cd auto-angler && uv run --locked python auto-angler.py
 ```
 
 Note: this project now uses `tkinter`. If you see `ModuleNotFoundError: No module named '_tkinter'`, install a Python
@@ -145,7 +168,7 @@ correlate missed bites against the captured frames. For denser PNG capture durin
 `AUTOANGLER_PROFILE_LOG_INTERVAL_S`.
 
 To summarize a session profile and its trigger sequence, run
-`uv run python -m autoangler.profile_session /path/to/session-profile.csv`.
+`uv run --locked python -m autoangler.profile_session /path/to/session-profile.csv`.
 
 To cap how often AutoAngler submits new screen-capture work, set
 `AUTOANGLER_MAX_CAPTURE_FPS` before launch. The default cap is `10`.
@@ -155,15 +178,15 @@ To capture a sampling-profiler flame graph for a live run, use
 If you omit the path, it writes to `~/.autoangler/flamegraph.svg`.
 
 To inspect a frame offline with the current detector, run
-`uv run python -m autoangler.analyze_image /path/to/frame.png`.
+`uv run --locked python -m autoangler.analyze_image /path/to/frame.png`.
 It writes a crop, processed mask, overlay, and JSON summary next to the image.
 
 To replay a recorded session against a detector configuration and append a JSON-LD experiment result, run
-`uv run python -m autoangler.experiment_harness /path/to/session.log --trace /path/to/session-trace.csv --box x1,y1,x2,y2`.
+`uv run --locked python -m autoangler.experiment_harness /path/to/session.log --trace /path/to/session-trace.csv --box x1,y1,x2,y2`.
 Results append to `~/.autoangler/experiment-log.jsonld` by default.
 
 To append a capture-backend benchmark entry from a session profile, run
-`uv run python -m autoangler.experiment_harness /path/to/session.log --profile /path/to/session-profile.csv --backend mss`.
+`uv run --locked python -m autoangler.experiment_harness /path/to/session.log --profile /path/to/session-profile.csv --backend mss`.
 Use `--backend pil` when logging a Pillow comparison run.
 
 From within minecraft to release the cursor you must hit ESC. This also stops fishing. 
