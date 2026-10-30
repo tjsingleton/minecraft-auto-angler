@@ -1,4 +1,4 @@
-.PHONY: setup lint format format-check test check build run run\:loop sessions\:clean
+.PHONY: setup lint format format-check test test-replay test-sensitivity check build verify-sdist run run\:loop sessions\:clean
 
 run:
 	uv run --locked python -m autoangler
@@ -37,7 +37,16 @@ format-check:
 test:
 	uv run --locked pytest
 
+test-replay:
+	uv run --locked pytest tests/test_runtime_replay.py tests/test_worker_lifecycle.py tests/test_cli_roundtrip.py
+
+test-sensitivity:
+	uv run --locked python scripts/verify_test_sensitivity.py
+
 check: lint format-check test
 
 build:
 	uv build
+
+verify-sdist:
+	uv run --locked python scripts/verify_sdist.py dist/*.tar.gz

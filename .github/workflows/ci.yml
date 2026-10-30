@@ -35,6 +35,8 @@ jobs:
       - run: make lint format-check
 
   test:
+    env:
+      AUTOANGLER_INTEGRATION: "0"
     strategy:
       fail-fast: false
       matrix:
@@ -59,17 +61,47 @@ jobs:
         run: uv run --locked python -c "import tkinter; print(tkinter.TkVersion)"
       - name: Test on Linux with a virtual display
         if: runner.os == 'Linux'
+        env:
+          PYTEST_ADDOPTS: --basetemp=${{ runner.temp }}/autoangler-tests --junitxml=${{ runner.temp }}/autoangler-pytest.xml
         run: xvfb-run -a make test
       - name: Test on macOS
         if: runner.os == 'macOS'
+        env:
+          PYTEST_ADDOPTS: --basetemp=${{ runner.temp }}/autoangler-tests --junitxml=${{ runner.temp }}/autoangler-pytest.xml
         run: make test
+      - name: Prove replay tests catch intentional regressions on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a uv run --locked python scripts/verify_test_sensitivity.py --work "$RUNNER_TEMP/autoangler-sensitivity"
+      - name: Prove replay tests catch intentional regressions on macOS
+        if: runner.os == 'macOS'
+        run: uv run --locked python scripts/verify_test_sensitivity.py --work "$RUNNER_TEMP/autoangler-sensitivity"
       - run: make build
       - name: Verify installed wheel on Linux
         if: runner.os == 'Linux'
-        run: xvfb-run -a uv run --locked python scripts/smoke_wheel.py dist/*.whl
+        run: xvfb-run -a uv run --locked python scripts/smoke_wheel.py dist/*.whl --work "$RUNNER_TEMP/autoangler-wheel"
       - name: Verify installed wheel on macOS
         if: runner.os == 'macOS'
-        run: uv run --locked python scripts/smoke_wheel.py dist/*.whl
+        run: uv run --locked python scripts/smoke_wheel.py dist/*.whl --work "$RUNNER_TEMP/autoangler-wheel"
+      - name: Verify fresh source distribution on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a uv run --locked python scripts/verify_sdist.py dist/*.tar.gz --work "$RUNNER_TEMP/autoangler-sdist"
+      - name: Verify fresh source distribution on macOS
+        if: runner.os == 'macOS'
+        run: uv run --locked python scripts/verify_sdist.py dist/*.tar.gz --work "$RUNNER_TEMP/autoangler-sdist"
       - name: Compile optional audio helper without capturing audio
         if: runner.os == 'macOS'
         run: swiftc -O autoangler/macos_minecraft_audio_capture.swift -o "$RUNNER_TEMP/macos_minecraft_audio_capture"
+      - name: Retain verification evidence on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verification-${{ matrix.os }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/autoangler-tests/
+            ${{ runner.temp }}/autoangler-pytest.xml
+            ${{ runner.temp }}/autoangler-sensitivity/
+            ${{ runner.temp }}/autoangler-wheel/offline/
+            ${{ runner.temp }}/autoangler-sdist/reports/
+            ${{ runner.temp }}/autoangler-sdist/wheel/offline/

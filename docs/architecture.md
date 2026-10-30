@@ -53,6 +53,15 @@ GUI-related imports require Tk and, on Linux, an X display even when no window i
 CI uses Xvfb on Linux. Native screenshots and real Tk capability checks require the explicit
 `AUTOANGLER_INTEGRATION=1` opt-in. See `validation.md` for live desktop validation.
 
+Connected runtime replay in `tests/replay_support.py` uses virtual scheduling and synthetic
+RGB capture while retaining real detector implementations, coordinator ticks, threaded workers,
+and recording codecs. Assertions cover action ordering, counters, lifecycle behavior, and
+readable artifacts. Desktop-boundary replacements live in the shared driver. Real Tk wiring
+runs separately in an opt-in subprocess with those same fake capture/input boundaries.
+Offline CLI verification is shared between the default suite and installed-wheel checks;
+source-distribution verification rebuilds and tests a fresh extraction. See `validation.md`
+for commands, failure evidence, and the deliberate-regression sensitivity check.
+
 ## Codebase-memory navigation
 
 Use `list_projects`, then `index_status` to select the graph rooted at this checkout.
