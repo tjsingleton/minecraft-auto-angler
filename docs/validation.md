@@ -128,3 +128,41 @@ Hosted GitHub Actions also remains pending because these workflow changes have n
 published. Live Minecraft checks remain pending. The full codebase-memory index was refreshed through
 `codebase-memory-mcp cli` and read back as ready with 919 nodes, 4,289 edges, no skipped
 files, and the documented partial Makefile parsing.
+
+## Refactor verification on 2026-10-30
+
+Verified with Python 3.13.18 and uv 0.13.6 on macOS ARM64 and in an isolated Linux ARM64
+Debian bookworm container using Xvfb:
+
+- Default checks: Ruff lint/format and 198 passed, 3 opt-in tests skipped on both platforms.
+- Sensitivity: all three intentional regressions caused the intended assertion failures on
+  both platforms; the unmodified control scenarios passed.
+- Built wheel: isolated installation, package/assets checks, and real offline CLI operations
+  passed on both platforms.
+- Fresh source archive: locked setup, lint/format, 198 passed with 3 skipped, rebuilding both
+  distributions, and the rebuilt installed-wheel checks passed on both platforms.
+- Real Tk wiring with fake desktop boundaries: 1 passed on macOS. Native capture capability
+  checks and live Minecraft/audio validation were not run.
+- Workflow syntax passed actionlint. Hosted GitHub Actions remains unverified for these changes.
+- The refreshed codebase index is ready with 1,019 nodes, 4,885 edges, no skipped files,
+  and only the previously documented partial first-line Makefile parsing.
+
+The earlier Linux setup limitation above is historical; this container run supplies local
+Linux evidence. It does not establish hosted Ubuntu runner results or live desktop behavior.
+
+Coverage was measured on macOS with an isolated Coverage.py 7.17.0 installation, branch
+measurement enabled, `source = autoangler`, and `patch = subprocess` so CLI subprocesses
+contribute. The scope contains 3,327 executable Python statements and 932 branch destinations.
+It excludes tests, verification scripts, and Swift code. Project dependencies were not changed.
+
+| Measurement | Line coverage | Branch coverage |
+| --- | --- | --- |
+| Default suite, 198 passed and 3 skipped | 78.87% (2,624/3,327) | 63.63% (593/932) |
+| Default data plus the passing opt-in Tk test | 83.02% (2,762/3,327) | 66.31% (618/932) |
+
+Default-suite line/branch coverage is 94.92%/80.00% for the asynchronous pipeline,
+96.55%/80.77% for session recording, and 100%/100% for the line watcher. GUI coordination
+measures 75.92%/67.73%, rising to 83.12%/70.72% with the opt-in Tk test. Remaining gaps
+include native audio helper lifecycle, platform window discovery, logging setup, and error
+branches. These measurements do not establish native capture or live Minecraft correctness.
+No minimum coverage threshold was introduced.
