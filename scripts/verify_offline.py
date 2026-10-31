@@ -14,7 +14,7 @@ import numpy as np
 
 
 def verify(work: Path, *, legacy: Path | None = None) -> None:
-    work.mkdir(parents=True, exist_ok=True)
+    work.mkdir(parents=True, exist_ok=False)
     home = work / "home"
     home.mkdir(exist_ok=True)
     env = {key: value for key, value in os.environ.items() if not key.startswith("AUTOANGLER_")}

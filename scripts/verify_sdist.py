@@ -29,6 +29,7 @@ def main() -> None:
         for name in (
             "VIRTUAL_ENV",
             "PYTHONPATH",
+            "PYTEST_ADDOPTS",
             "UV_PROJECT_ENVIRONMENT",
             "AUTOANGLER_INTEGRATION",
         ):
