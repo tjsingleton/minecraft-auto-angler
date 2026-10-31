@@ -6,15 +6,18 @@ import argparse
 import os
 import subprocess
 import sys
-import tempfile
 import zipfile
 from pathlib import Path
+
+from verification_support import verification_directory
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wheel", type=Path)
-    wheel = parser.parse_args().wheel.resolve(strict=True)
+    parser.add_argument("--work", type=Path, help="Retain evidence in a new directory")
+    args = parser.parse_args()
+    wheel = args.wheel.resolve(strict=True)
     project = Path(__file__).resolve().parents[1]
     with zipfile.ZipFile(wheel) as archive:
         names = set(archive.namelist())
@@ -22,12 +25,18 @@ def main() -> None:
         assert "autoangler/macos_minecraft_audio_capture.swift" in names
         assert not any(name.endswith((".DS_Store", ".pyc")) for name in names)
 
-    with tempfile.TemporaryDirectory(prefix="autoangler-wheel-") as directory:
-        work = Path(directory)
+    with verification_directory("autoangler-wheel-", args.work) as work:
         environment = work / "venv"
         env = os.environ.copy()
         env.pop("PYTHONPATH", None)
         env.pop("VIRTUAL_ENV", None)
+        home = work / "home"
+        home.mkdir()
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        for name in list(env):
+            if name.startswith("AUTOANGLER_"):
+                env.pop(name)
 
         def run(*command: str) -> None:
             subprocess.run(command, cwd=work, env=env, check=True)
@@ -64,6 +73,7 @@ def main() -> None:
             "assert all(assets.joinpath(name).is_file() for name in names); "
             "print('Installed package and all templates verified')",
         )
+        run(python, str(project / "scripts" / "verify_offline.py"), "--work", str(work / "offline"))
 
 
 if __name__ == "__main__":

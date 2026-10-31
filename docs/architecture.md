@@ -53,6 +53,15 @@ GUI-related imports require Tk and, on Linux, an X display even when no window i
 CI uses Xvfb on Linux. Native screenshots and real Tk capability checks require the explicit
 `AUTOANGLER_INTEGRATION=1` opt-in. See `validation.md` for live desktop validation.
 
+Connected runtime replay in `tests/replay_support.py` uses virtual scheduling and synthetic
+RGB capture while retaining real detector implementations, coordinator ticks, threaded workers,
+and recording codecs. Assertions cover action ordering, counters, lifecycle behavior, and
+readable artifacts. Desktop-boundary replacements live in the shared driver. Real Tk wiring
+runs separately in an opt-in subprocess with those same fake capture/input boundaries.
+Offline CLI verification is shared between the default suite and installed-wheel checks;
+source-distribution verification rebuilds and tests a fresh extraction. See `validation.md`
+for commands, failure evidence, and the deliberate-regression sensitivity check.
+
 ## Codebase-memory navigation
 
 Use `list_projects`, then `index_status` to select the graph rooted at this checkout.
@@ -60,7 +69,7 @@ Use `get_architecture`, `search_graph`, `get_code_snippet`, and `trace_path` for
 definitions, and call relationships. Check `has_more` or cursors and paginate as needed.
 Call `check_index_coverage` for relevant paths and scopes; read flagged source directly.
 
-The full index refreshed on 2026-10-30 contains 919 nodes and 4,289 edges, with no skipped
+The full index refreshed on 2026-10-30 contains 1,019 nodes and 4,885 edges, with no skipped
 files. It records partial parsing at the first line of `Makefile`, which was inspected directly.
 Image templates and screenshots are intentionally excluded by suffix; Git metadata, caches,
 virtual environments, build output, and local `.omc` state are excluded. These exclusions do
