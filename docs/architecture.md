@@ -69,7 +69,7 @@ Use `get_architecture`, `search_graph`, `get_code_snippet`, and `trace_path` for
 definitions, and call relationships. Check `has_more` or cursors and paginate as needed.
 Call `check_index_coverage` for relevant paths and scopes; read flagged source directly.
 
-The full index refreshed on 2026-10-30 contains 919 nodes and 4,289 edges, with no skipped
+The full index refreshed on 2026-10-30 contains 1,019 nodes and 4,885 edges, with no skipped
 files. It records partial parsing at the first line of `Makefile`, which was inspected directly.
 Image templates and screenshots are intentionally excluded by suffix; Git metadata, caches,
 virtual environments, build output, and local `.omc` state are excluded. These exclusions do
